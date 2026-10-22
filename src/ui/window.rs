@@ -8,10 +8,12 @@ use super::accounts;
 use super::console;
 use super::detail::{self, SandboxAction};
 use super::dialogs;
+use super::notifications;
 use super::policy::{self, PolicyEdit};
 use super::preferences;
 use super::sidebar;
 use crate::gateway::{self, Command, Event};
+use crate::indicator::{self, Indicator, Summary};
 use crate::model::{Sandbox, SandboxState};
 use crate::settings;
 use openshell_lxd::{self as lxd, LxdStatus};
@@ -60,6 +62,11 @@ mod imp {
                 glib::WeakRef<gtk::ListBox>,
             )>,
         >,
+        /// The top bar indicator, once the shell has accepted it.
+        pub indicator: RefCell<Option<Indicator>>,
+        /// Whether closing the window has already explained that the app
+        /// keeps running.
+        pub told_still_running: Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -85,11 +92,33 @@ mod imp {
             obj.setup_sidebar();
             obj.update_status();
             obj.setup_gateway();
+            obj.setup_indicator();
         }
     }
 
     impl WidgetImpl for Window {}
-    impl WindowImpl for Window {}
+    impl WindowImpl for Window {
+        /// With the indicator up and sandboxes running, closing only hides
+        /// the window, so blocked requests and status changes still arrive.
+        fn close_request(&self) -> glib::Propagation {
+            let obj = self.obj();
+            let running = self
+                .sandboxes
+                .borrow()
+                .iter()
+                .any(|s| s.state == SandboxState::Running);
+            if self.indicator.borrow().is_none() || !running {
+                return self.parent_close_request();
+            }
+            obj.set_visible(false);
+            if !self.told_still_running.replace(true)
+                && let Some(app) = obj.application()
+            {
+                notifications::still_running(app.upcast_ref());
+            }
+            glib::Propagation::Stop
+        }
+    }
     impl ApplicationWindowImpl for Window {}
     impl AdwApplicationWindowImpl for Window {}
 }
@@ -157,6 +186,81 @@ impl Window {
         ));
     }
 
+    fn setup_indicator(&self) {
+        let (handle, actions) = Indicator::spawn();
+        glib::spawn_future_local(glib::clone!(
+            #[weak(rename_to = win)]
+            self,
+            async move {
+                if let Ok(indicator) = handle.recv().await {
+                    win.imp().indicator.replace(Some(indicator));
+                    win.update_indicator();
+                }
+            }
+        ));
+        glib::spawn_future_local(glib::clone!(
+            #[weak(rename_to = win)]
+            self,
+            async move {
+                while let Ok(action) = actions.recv().await {
+                    win.on_indicator_action(action);
+                }
+            }
+        ));
+    }
+
+    fn update_indicator(&self) {
+        let imp = self.imp();
+        let Some(indicator) = imp.indicator.borrow().as_ref().map(Indicator::clone_handle) else {
+            return;
+        };
+        let sandboxes = imp.sandboxes.borrow();
+        indicator.update(Summary {
+            connected: imp.connected.get(),
+            running: sandboxes
+                .iter()
+                .filter(|s| s.state == SandboxState::Running)
+                .map(|s| s.name.clone())
+                .collect(),
+            pending: sandboxes
+                .iter()
+                .filter(|s| !s.prompts.is_empty())
+                .map(|s| (s.name.clone(), s.prompts.len()))
+                .collect(),
+        });
+    }
+
+    fn on_indicator_action(&self, action: indicator::Action) {
+        use indicator::Action;
+        match action {
+            Action::Show => self.present(),
+            Action::NewSandbox => {
+                self.present();
+                self.new_sandbox_dialog();
+            }
+            Action::OpenTerminal(name) => console::open_shell(self, &name),
+            Action::Stop(name) => self.send(Command::Stop(name)),
+            Action::Review(name) => {
+                self.present();
+                let index = self
+                    .imp()
+                    .sandboxes
+                    .borrow()
+                    .iter()
+                    .position(|s| s.name == name);
+                let list = &self.imp().sidebar_list;
+                if let Some(row) = index.and_then(|i| list.row_at_index(i as i32)) {
+                    list.select_row(Some(&row));
+                }
+            }
+            Action::Quit => {
+                if let Some(app) = self.application() {
+                    app.quit();
+                }
+            }
+        }
+    }
+
     pub fn is_connected(&self) -> bool {
         self.imp().connected.get()
     }
@@ -209,6 +313,15 @@ impl Window {
                     })
                     .collect();
                 self.notify_new_prompts(&new);
+                if let Some(app) = self.application() {
+                    if was_connected {
+                        for change in notifications::status_changes(&imp.sandboxes.borrow(), &new) {
+                            notifications::send(app.upcast_ref(), &change);
+                        }
+                    } else {
+                        notifications::gateway_back(app.upcast_ref());
+                    }
+                }
                 self.replace_sandboxes(new);
                 // An unchanged empty list leaves the "not running" page up.
                 if !was_connected && imp.sandboxes.borrow().is_empty() {
@@ -219,6 +332,9 @@ impl Window {
                 let was_connected = imp.connected.replace(false);
                 if was_connected {
                     self.refresh_accounts();
+                    if let Some(app) = self.application() {
+                        notifications::gateway_lost(app.upcast_ref(), &reason);
+                    }
                 }
                 let changed = *imp.gateway_error.borrow() != reason;
                 imp.gateway_error.replace(reason);
@@ -278,6 +394,7 @@ impl Window {
             }
         }
         self.update_status();
+        self.update_indicator();
     }
 
     /// Swaps in a new sandbox list, keeping the selection on the same sandbox

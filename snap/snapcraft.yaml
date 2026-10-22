@@ -50,6 +50,9 @@ apps:
     plugs:
       - lxd
       - network
+      # The top bar indicator: unity7 lets a strict snap register a
+      # StatusNotifierItem and serve its menu over D-Bus.
+      - unity7
     slots:
       - dbus-openshell-desktop
 
