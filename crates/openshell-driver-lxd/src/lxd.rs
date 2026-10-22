@@ -50,6 +50,12 @@ impl std::fmt::Display for LxdError {
 
 impl std::error::Error for LxdError {}
 
+/// The `ERROR` lines of an lxc.log, at most the last 20.
+fn lxc_errors(log: &str) -> String {
+    let errors: Vec<&str> = log.lines().filter(|l| l.contains(" ERROR ")).collect();
+    errors[errors.len().saturating_sub(20)..].join("\n")
+}
+
 pub type Result<T> = std::result::Result<T, LxdError>;
 
 type Body = BoxBody<Bytes, std::io::Error>;
@@ -180,7 +186,32 @@ impl Client {
                 None,
             )
             .await?;
-        self.wait(&metadata).await.map(drop)
+        match self.wait(&metadata).await {
+            Ok(_) => Ok(()),
+            // LXD only says forkstart failed; liblxc's reason is in the
+            // instance's lxc.log, which a cleanup would delete with it.
+            Err(LxdError::Api { status, message }) if action == "start" => {
+                let log = self.start_log(name).await;
+                Err(LxdError::Api {
+                    status,
+                    message: if log.is_empty() {
+                        message
+                    } else {
+                        format!("{message}\nlxc.log:\n{log}")
+                    },
+                })
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The error lines of an instance's last start attempt, or empty.
+    async fn start_log(&self, name: &str) -> String {
+        let url = self.scoped(&format!("/1.0/instances/{name}/logs/lxc.log"));
+        match self.raw("GET", &url, empty_body(), None).await {
+            Ok((StatusCode::OK, body)) => lxc_errors(&String::from_utf8_lossy(&body)),
+            _ => String::new(),
+        }
     }
 
     pub async fn delete_instance(&self, name: &str) -> Result<()> {
@@ -607,6 +638,19 @@ fn percent_encode(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keeps_only_lxc_error_lines() {
+        let log = "lxc c 20261022 INFO     conf - started\n\
+                   lxc c 20261022 ERROR    conf - Failed to mount sysfs\n\
+                   lxc c 20261022 WARN     start - something\n\
+                   lxc c 20261022 ERROR    start - Failed to setup container";
+        assert_eq!(
+            lxc_errors(log),
+            "lxc c 20261022 ERROR    conf - Failed to mount sysfs\n\
+             lxc c 20261022 ERROR    start - Failed to setup container"
+        );
+    }
 
     #[test]
     fn parses_instance_lifecycle_events() {
