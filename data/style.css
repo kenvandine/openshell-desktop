@@ -15,3 +15,8 @@
 .state-dot.running { color: @success_color; }
 .state-dot.stopped { color: @dim_label_color; }
 .state-dot.busy { color: @warning_color; }
+/* Like AdwBanner, which has room for only one button. */
+.approval-bar {
+  padding: 6px 6px 6px 12px;
+  background-color: alpha(@accent_bg_color, 0.3);
+}

@@ -60,6 +60,11 @@ pub enum Command {
         sandbox: String,
         rule: String,
     },
+    /// Let the gateway approve low-risk requests itself, or ask every time.
+    SetAutoApprove {
+        sandbox: String,
+        enabled: bool,
+    },
     /// Store credentials as provider `name` of profile `kind`.
     CreateProvider {
         name: String,
@@ -85,6 +90,9 @@ impl Command {
             Command::AddRule { host, port, .. } => format!("Allowing {host}:{port}"),
             Command::RemoveEndpoint { host, port, .. } => format!("Removing {host}:{port}"),
             Command::RemoveRule { rule, .. } => format!("Removing rule {rule}"),
+            Command::SetAutoApprove { sandbox, .. } => {
+                format!("Changing how {sandbox} asks for approval")
+            }
             Command::CreateProvider { name, .. } => format!("Adding account {name}"),
             Command::DeleteProvider(name) => format!("Removing account {name}"),
         })
@@ -342,6 +350,14 @@ async fn execute(gateway: &mut Gateway, command: Command) -> Result<Outcome, Err
         Command::RemoveRule { sandbox, rule } => {
             let version = gateway.remove_rule(&sandbox, &rule).await?;
             Some(format!("Removed rule {rule} (policy version {version})"))
+        }
+        Command::SetAutoApprove { sandbox, enabled } => {
+            gateway.set_auto_approve(&sandbox, enabled).await?;
+            Some(if enabled {
+                format!("{sandbox} now allows low-risk requests automatically")
+            } else {
+                format!("{sandbox} now asks before allowing any request")
+            })
         }
         Command::CreateProvider {
             name,

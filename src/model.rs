@@ -3,7 +3,7 @@
 //! Sandboxes come from the OpenShell gateway, enriched with LXD details. While
 //! the gateway is unreachable the app lists LXD instances directly.
 
-use openshell_gateway_client::{PolicyView, Proposal, Snapshot, State};
+use openshell_gateway_client::{AutoApprove, PolicyView, Proposal, Snapshot, State};
 use openshell_lxd::{Listed, parse_cpu_limit, parse_memory_mb};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +100,8 @@ pub struct Sandbox {
     pub policy: Option<PolicyView>,
     /// Catalog id of the agent the app installs and runs in it.
     pub agent: Option<String>,
+    /// Whether the gateway allows low-risk blocked requests by itself.
+    pub auto_approve: AutoApprove,
 }
 
 impl Sandbox {
@@ -187,6 +189,7 @@ impl Sandbox {
             prompts: vec![],
             policy: None,
             agent: None,
+            auto_approve: AutoApprove::default(),
         }
     }
 }
@@ -215,6 +218,7 @@ impl Sandbox {
             prompts: vec![],
             policy: None,
             agent: None,
+            auto_approve: AutoApprove::default(),
         });
         sandbox.name = info.name.clone();
         sandbox.state = match info.state {
@@ -224,6 +228,7 @@ impl Sandbox {
         };
         sandbox.phase = info.phase.clone();
         sandbox.agent = info.agent.clone();
+        sandbox.auto_approve = snapshot.auto_approve;
         sandbox.status_detail = info.detail.clone();
         sandbox.rules = snapshot
             .policy

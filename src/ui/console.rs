@@ -10,6 +10,8 @@ use gtk::glib;
 use openshell_agents::Agent;
 use openshell_gateway_client::ExecOptions;
 
+use super::approvals::ApprovalBar;
+use super::window::Window;
 use crate::shell::{Session, SessionEvent};
 use crate::terminal::TerminalView;
 
@@ -24,11 +26,11 @@ const LXD_SHELL: &[&str] = &[
 const GATEWAY_SHELL: &[&str] = &["/bin/bash", "-l"];
 
 /// A login shell in `sandbox`, under its policy and with its providers.
-pub fn open_shell(parent: &impl IsA<gtk::Window>, sandbox: &str) {
+pub fn open_shell(parent: &Window, sandbox: &str) {
     open(
         parent,
         &format!("{sandbox} — Terminal"),
-        None,
+        Kind::Gateway(sandbox),
         |cols, rows| {
             let options = ExecOptions {
                 command: GATEWAY_SHELL.iter().map(|s| s.to_string()).collect(),
@@ -40,7 +42,7 @@ pub fn open_shell(parent: &impl IsA<gtk::Window>, sandbox: &str) {
 }
 
 /// `agent` in `sandbox`, started in `workdir` (blank for the sandbox's own).
-pub fn open_agent(parent: &impl IsA<gtk::Window>, sandbox: &str, agent: &Agent, workdir: &str) {
+pub fn open_agent(parent: &Window, sandbox: &str, agent: &Agent, workdir: &str) {
     let options = ExecOptions {
         command: agent.command(),
         workdir: workdir.to_owned(),
@@ -54,17 +56,17 @@ pub fn open_agent(parent: &impl IsA<gtk::Window>, sandbox: &str, agent: &Agent, 
     open(
         parent,
         &format!("{sandbox} — {}", agent.name),
-        None,
+        Kind::Gateway(sandbox),
         |cols, rows| Session::gateway(sandbox.to_owned(), options, cols, rows),
     );
 }
 
 /// A shell in LXD `instance` itself, for when the sandbox will not start.
-pub fn open_debug(parent: &impl IsA<gtk::Window>, instance: &str) {
+pub fn open_debug(parent: &Window, instance: &str) {
     open(
         parent,
         &format!("{instance} — Debug Console"),
-        Some("Debug console: this shell runs outside OpenShell's sandbox policy"),
+        Kind::Debug,
         |cols, rows| {
             let command = LXD_SHELL.iter().map(|s| s.to_string()).collect();
             Session::lxd(instance.to_owned(), command, cols, rows)
@@ -72,10 +74,18 @@ pub fn open_debug(parent: &impl IsA<gtk::Window>, instance: &str) {
     );
 }
 
+/// Where a terminal's session runs, which decides what sits above it.
+enum Kind<'a> {
+    /// Through the gateway in this sandbox, whose blocked requests it shows.
+    Gateway(&'a str),
+    /// In the LXD instance, outside the policy, which it warns about.
+    Debug,
+}
+
 fn open(
-    parent: &impl IsA<gtk::Window>,
+    parent: &Window,
     title: &str,
-    warning: Option<&str>,
+    kind: Kind,
     start: impl FnOnce(u16, u16) -> (Session, async_channel::Receiver<SessionEvent>),
 ) {
     let terminal = TerminalView::new();
@@ -85,7 +95,8 @@ fn open(
 
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&adw::HeaderBar::new());
-    if let Some(warning) = warning {
+    if let Kind::Debug = kind {
+        let warning = "Debug console: this shell runs outside OpenShell's sandbox policy";
         toolbar.add_top_bar(&adw::Banner::builder().title(warning).revealed(true).build());
     }
     toolbar.set_content(Some(&stack));
@@ -96,8 +107,13 @@ fn open(
         .default_height(520)
         .content(&toolbar)
         .build();
-    if let Some(app) = parent.as_ref().application() {
+    if let Some(app) = parent.application() {
         window.set_application(Some(&app));
+    }
+    if let Kind::Gateway(sandbox) = kind {
+        let bar = ApprovalBar::new(parent, &window, sandbox);
+        toolbar.add_top_bar(bar.widget());
+        parent.add_approval_bar(bar);
     }
 
     let (cols, rows) = terminal.size();

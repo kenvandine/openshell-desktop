@@ -15,6 +15,7 @@ pub enum SandboxAction {
     ToggleRunning,
     AllowDomain(usize),
     IgnorePrompt(usize),
+    SetAutoApprove(bool),
     AddMount,
     RemoveMount(usize),
     AddRule,
@@ -147,6 +148,28 @@ fn advisor_group(sandbox: &Sandbox, window: &Window) -> adw::PreferencesGroup {
         .title("Policy Advisor")
         .description("Recent outbound requests blocked by the OpenShell proxy")
         .build();
+
+    let auto = adw::SwitchRow::builder()
+        .title("Approve Low-Risk Requests Automatically")
+        .active(sandbox.auto_approve.enabled)
+        .build();
+    if sandbox.auto_approve.gateway_wide {
+        auto.set_subtitle("Set for every sandbox in the gateway's settings");
+        auto.set_sensitive(false);
+    } else {
+        auto.set_subtitle(
+            "Allows a request when OpenShell finds it grants nothing beyond \
+             that host. Anything riskier still asks.",
+        );
+        auto.set_sensitive(sandbox.policy.is_some());
+    }
+    let weak = window.downgrade();
+    auto.connect_active_notify(move |row| {
+        if let Some(window) = weak.upgrade() {
+            window.handle_action(SandboxAction::SetAutoApprove(row.is_active()));
+        }
+    });
+    group.add(&auto);
 
     if sandbox.prompts.is_empty() {
         group.add(
