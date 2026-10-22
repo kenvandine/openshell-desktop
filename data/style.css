@@ -14,3 +14,4 @@
 }
 .state-dot.running { color: @success_color; }
 .state-dot.stopped { color: @dim_label_color; }
+.state-dot.busy { color: @warning_color; }

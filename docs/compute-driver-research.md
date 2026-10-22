@@ -31,7 +31,7 @@ Gateway TOML:
 
 ```toml
 [openshell.gateway]
-compute_drivers = ["lxd"]          # any non-reserved name
+compute_driver = "lxd"            # any non-reserved name
 
 [openshell.drivers.lxd]
 socket_path = "/run/openshell/lxd.sock"

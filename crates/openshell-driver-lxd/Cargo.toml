@@ -11,6 +11,11 @@ path = "src/main.rs"
 
 [dependencies]
 bytes = "1"
+# The driver speaks OpenShell's own protos and types, pinned to one commit so
+# the wire contract cannot drift from what the gateway was built against.
+openshell-core = { git = "https://github.com/NVIDIA/OpenShell", rev = "39d95b42cb403d883e2f545a3861131ccd3d2ebf", default-features = false, features = ["driver-extraction", "jwt"] }
+openshell-isolation-interface = { git = "https://github.com/NVIDIA/OpenShell", rev = "39d95b42cb403d883e2f545a3861131ccd3d2ebf" }
+openshell-sandbox-backend = { git = "https://github.com/NVIDIA/OpenShell", rev = "39d95b42cb403d883e2f545a3861131ccd3d2ebf" }
 clap = { version = "4", features = ["derive", "env"] }
 flate2 = "1"
 futures = "0.3"
@@ -18,7 +23,6 @@ http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 oci-client = { version = "0.18", default-features = false, features = ["rustls-tls"] }
-prost = "0.14"
 prost-types = "0.14"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -29,13 +33,9 @@ tokio-stream = { version = "0.1", features = ["net", "sync"] }
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tonic = { version = "0.14", features = ["transport"] }
-tonic-prost = "0.14"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-[build-dependencies]
-protox = "0.9"
-tonic-prost-build = "0.14"
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tower = "0.5"

@@ -60,6 +60,84 @@ pub struct MemoryState {
     pub usage: u64,
 }
 
+/// Config keys the OpenShell LXD driver sets on the instances it manages.
+const KEY_MANAGED_BY: &str = "user.openshell.managed-by";
+const KEY_ROLE: &str = "user.openshell.role";
+const KEY_SANDBOX_ID: &str = "user.openshell.sandbox-id";
+const KEY_SANDBOX_NAME: &str = "user.openshell.sandbox-name";
+
+/// What an instance is within an OpenShell sandbox. The driver runs each
+/// sandbox as a network-less workload plus a supervisor companion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    Workload,
+    Supervisor,
+}
+
+impl Instance {
+    /// `None` for instances the OpenShell driver did not create.
+    pub fn openshell_role(&self) -> Option<Role> {
+        let config = &self.expanded_config;
+        if config.get(KEY_MANAGED_BY).map(String::as_str) != Some("openshell") {
+            return None;
+        }
+        match config.get(KEY_ROLE).map(String::as_str) {
+            Some("workload") => Some(Role::Workload),
+            Some("supervisor") => Some(Role::Supervisor),
+            _ => None,
+        }
+    }
+
+    pub fn openshell_sandbox_id(&self) -> Option<&str> {
+        self.expanded_config.get(KEY_SANDBOX_ID).map(String::as_str)
+    }
+
+    /// The gateway-visible sandbox name, when the driver recorded one.
+    pub fn openshell_sandbox_name(&self) -> Option<&str> {
+        self.expanded_config
+            .get(KEY_SANDBOX_NAME)
+            .map(String::as_str)
+            .filter(|name| !name.is_empty())
+    }
+}
+
+/// One row of the sandbox list: an instance worth showing, and whether it is
+/// really up.
+#[derive(Debug, Clone, Copy)]
+pub struct Listed<'a> {
+    pub instance: &'a Instance,
+    /// A managed workload counts as running only while its supervisor does
+    /// too, since without the supervisor nothing enforces its policy.
+    pub running: bool,
+}
+
+/// Collapses workload/supervisor pairs into one entry per sandbox and keeps
+/// instances the driver does not manage as they are.
+pub fn list_sandboxes(instances: &[Instance]) -> Vec<Listed<'_>> {
+    let running_supervisors: std::collections::HashSet<&str> = instances
+        .iter()
+        .filter(|i| i.openshell_role() == Some(Role::Supervisor) && i.status == "Running")
+        .filter_map(Instance::openshell_sandbox_id)
+        .collect();
+    instances
+        .iter()
+        .filter_map(|instance| match instance.openshell_role() {
+            Some(Role::Supervisor) => None,
+            Some(Role::Workload) => Some(Listed {
+                instance,
+                running: instance.status == "Running"
+                    && instance
+                        .openshell_sandbox_id()
+                        .is_some_and(|id| running_supervisors.contains(id)),
+            }),
+            None => Some(Listed {
+                instance,
+                running: instance.status == "Running",
+            }),
+        })
+        .collect()
+}
+
 /// Secrets for the websockets of an interactive exec operation.
 #[derive(Debug, Clone)]
 pub struct ExecSession {
@@ -231,6 +309,66 @@ mod tests {
         assert_eq!(parse_memory_mb("512MiB"), Some(512));
         assert_eq!(parse_memory_mb("1GB"), Some(954));
         assert_eq!(parse_memory_mb("50%"), None);
+    }
+
+    fn instance(name: &str, status: &str, config: &[(&str, &str)]) -> Instance {
+        Instance {
+            name: name.into(),
+            status: status.into(),
+            kind: "container".into(),
+            profiles: vec![],
+            expanded_config: config
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+            expanded_devices: HashMap::new(),
+            state: None,
+        }
+    }
+
+    fn managed(name: &str, status: &str, role: &str, id: &str) -> Instance {
+        instance(
+            name,
+            status,
+            &[
+                (KEY_MANAGED_BY, "openshell"),
+                (KEY_ROLE, role),
+                (KEY_SANDBOX_ID, id),
+                (KEY_SANDBOX_NAME, "my-agent"),
+            ],
+        )
+    }
+
+    #[test]
+    fn folds_supervisors_into_their_sandbox() {
+        let instances = [
+            managed("openshell-a", "Running", "workload", "a"),
+            managed("openshell-sup-a", "Running", "supervisor", "a"),
+            managed("openshell-b", "Running", "workload", "b"),
+            managed("openshell-sup-b", "Stopped", "supervisor", "b"),
+            managed("openshell-c", "Stopped", "workload", "c"),
+            instance("plain", "Running", &[]),
+        ];
+        let listed = list_sandboxes(&instances);
+        let names: Vec<&str> = listed.iter().map(|l| l.instance.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["openshell-a", "openshell-b", "openshell-c", "plain"]
+        );
+        let running: Vec<bool> = listed.iter().map(|l| l.running).collect();
+        assert_eq!(running, [true, false, false, true]);
+        assert_eq!(
+            listed[0].instance.openshell_sandbox_name(),
+            Some("my-agent")
+        );
+        assert_eq!(listed[3].instance.openshell_role(), None);
+    }
+
+    #[test]
+    fn ignores_foreign_role_keys() {
+        let impostor = instance("x", "Running", &[(KEY_ROLE, "supervisor")]);
+        assert_eq!(impostor.openshell_role(), None);
+        assert_eq!(list_sandboxes(&[impostor]).len(), 1);
     }
 
     #[test]

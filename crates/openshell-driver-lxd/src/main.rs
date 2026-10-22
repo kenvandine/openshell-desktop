@@ -16,8 +16,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
-use openshell_driver_lxd::admission::AdmissionConfig;
-use openshell_driver_lxd::driver::{DEFAULT_IMAGE, DriverConfig, LxdDriver};
+use openshell_core::resource_admission::DriverAdmissionConfig;
+use openshell_driver_lxd::driver::{DEFAULT_IMAGE, DriverConfig, LxdDriver, SupervisorNetwork};
 use openshell_driver_lxd::lxd;
 use openshell_driver_lxd::oci::Importer;
 use openshell_driver_lxd::proto::compute::v1::compute_driver_server::ComputeDriverServer;
@@ -79,6 +79,39 @@ struct Args {
     /// Set `nvidia.runtime=true` on GPU sandboxes.
     #[arg(long)]
     nvidia_runtime: bool,
+
+    /// Gateway gRPC endpoint as the sandbox supervisor reaches it, for
+    /// example `https://127.0.0.1:8080`.
+    #[arg(long, env = "OPENSHELL_GRPC_ENDPOINT")]
+    grpc_endpoint: String,
+
+    /// Gateway CA certificate (PEM) the supervisor trusts. Required when the
+    /// gateway serves TLS with a private CA.
+    #[arg(long, env = "OPENSHELL_TLS_CA")]
+    tls_ca: Option<PathBuf>,
+
+    /// OCI image that ships `/openshell-sandbox`, the workload runtime.
+    /// Defaults to OpenShell's published image for this version.
+    #[arg(long, env = "OPENSHELL_SANDBOX_RUNTIME_IMAGE")]
+    sandbox_runtime_image: Option<String>,
+
+    /// OCI image that ships `/openshell-supervisor`.
+    #[arg(long, env = "OPENSHELL_SUPERVISOR_IMAGE")]
+    supervisor_image: Option<String>,
+
+    /// Run the supervisor on this LXD managed network instead of the host's
+    /// network namespace. Its image must configure the interface itself.
+    #[arg(long)]
+    supervisor_network: Option<String>,
+
+    /// Address the supervisor dials to reach the host. Defaults to loopback,
+    /// or the bridge's address with `--supervisor-network`.
+    #[arg(long)]
+    host_gateway_ip: Option<std::net::IpAddr>,
+
+    /// File copied to the supervisor as `/etc/resolv.conf`.
+    #[arg(long, default_value = "/etc/resolv.conf")]
+    resolv_conf: PathBuf,
 }
 
 fn parse_mode(value: &str) -> Result<u32, String> {
@@ -99,13 +132,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|common| PathBuf::from(common).join("staging"))
             .unwrap_or_else(|| std::env::temp_dir().join("openshell-driver-lxd"))
     });
+    let defaults = DriverConfig::default();
     let config = DriverConfig {
         storage_pool: args.storage_pool,
         default_image: args.default_image,
-        admission: AdmissionConfig::parse(&args.admission_config_json)?,
+        admission: args
+            .admission_config_json
+            .parse::<DriverAdmissionConfig>()?,
         gpu: args.gpu,
         nvidia_runtime: args.nvidia_runtime,
-        ..DriverConfig::default()
+        grpc_endpoint: args.grpc_endpoint,
+        tls_ca: args.tls_ca,
+        sandbox_runtime_image: args
+            .sandbox_runtime_image
+            .unwrap_or(defaults.sandbox_runtime_image),
+        supervisor_image: args.supervisor_image.unwrap_or(defaults.supervisor_image),
+        network: args
+            .supervisor_network
+            .map_or(SupervisorNetwork::Host, SupervisorNetwork::Bridge),
+        host_gateway_ip: args.host_gateway_ip,
+        resolv_conf: std::fs::read(&args.resolv_conf).ok(),
+        ..defaults
     };
 
     let client = lxd::Client::new(&args.lxd_socket, args.project);

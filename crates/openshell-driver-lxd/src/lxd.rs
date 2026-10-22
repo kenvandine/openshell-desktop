@@ -64,6 +64,23 @@ pub struct Instance {
     pub created_at: Option<String>,
     #[serde(default)]
     pub last_used_at: Option<String>,
+    #[serde(default)]
+    pub profiles: Vec<String>,
+    /// Devices set on the instance itself.
+    #[serde(default)]
+    pub devices: HashMap<String, HashMap<String, String>>,
+    /// Devices after profiles are applied; what the instance really gets.
+    #[serde(default)]
+    pub expanded_devices: HashMap<String, HashMap<String, String>>,
+}
+
+/// Ownership and mode for a file pushed into an instance. The IDs are
+/// inside the instance's user namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileMeta {
+    pub uid: u32,
+    pub gid: u32,
+    pub mode: u32,
 }
 
 /// One lifecycle event from `GET /1.0/events`.
@@ -190,6 +207,123 @@ impl Client {
             Ok((status, body)) => Err(error_from_body(status, &body)),
             Err(error) => Err(error),
         }
+    }
+
+    /// Writes a file into an instance, replacing any existing one. Works on
+    /// the root filesystem of a stopped instance and, once running, also on
+    /// device mounts.
+    pub async fn push_file(
+        &self,
+        name: &str,
+        path: &str,
+        content: &[u8],
+        meta: FileMeta,
+    ) -> Result<()> {
+        self.push(name, path, "file", content, meta, false).await
+    }
+
+    /// Creates a directory if it is missing; an existing one is left alone.
+    /// Parents must exist.
+    pub async fn make_dir(&self, name: &str, path: &str, meta: FileMeta) -> Result<()> {
+        self.push(name, path, "directory", &[], meta, false).await
+    }
+
+    /// Creates a directory, or fixes the owner and mode of an existing one.
+    /// Parents must exist.
+    pub async fn ensure_dir(&self, name: &str, path: &str, meta: FileMeta) -> Result<()> {
+        self.push(name, path, "directory", &[], meta, true).await
+    }
+
+    async fn push(
+        &self,
+        name: &str,
+        path: &str,
+        kind: &str,
+        content: &[u8],
+        meta: FileMeta,
+        modify_existing: bool,
+    ) -> Result<()> {
+        let url = self.scoped(&format!(
+            "/1.0/instances/{name}/files?path={}",
+            percent_encode(path)
+        ));
+        let mut headers = vec![
+            ("X-LXD-uid", meta.uid.to_string()),
+            ("X-LXD-gid", meta.gid.to_string()),
+            ("X-LXD-mode", format!("{:04o}", meta.mode)),
+            ("X-LXD-type", kind.to_owned()),
+            ("X-LXD-write", "overwrite".to_owned()),
+        ];
+        if modify_existing {
+            headers.push(("X-LXD-modify-perm", "mode,uid,gid".to_owned()));
+        }
+        let body = Full::new(Bytes::copy_from_slice(content))
+            .map_err(|never| match never {})
+            .boxed();
+        let (status, bytes) = self
+            .raw_with(
+                "POST",
+                &url,
+                body,
+                Some((content.len() as u64, "application/octet-stream")),
+                &headers,
+            )
+            .await?;
+        if status.is_success() {
+            Ok(())
+        } else {
+            Err(error_from_body(status, &bytes))
+        }
+    }
+
+    /// Creates an empty filesystem volume in `pool`. Existing is fine.
+    pub async fn create_volume(&self, pool: &str, name: &str) -> Result<()> {
+        // Both instances of a sandbox mount the volume.
+        let body = json!({
+            "name": name,
+            "type": "custom",
+            "content_type": "filesystem",
+            "config": { "security.shared": "true" },
+        });
+        match self
+            .send(
+                "POST",
+                &self.scoped(&format!("/1.0/storage-pools/{pool}/volumes/custom")),
+                json_body(&body),
+                None,
+            )
+            .await
+        {
+            Ok(_) | Err(LxdError::Api { status: 409, .. }) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Deletes a custom volume; a missing one is fine.
+    pub async fn delete_volume(&self, pool: &str, name: &str) -> Result<()> {
+        match self
+            .send(
+                "DELETE",
+                &self.scoped(&format!("/1.0/storage-pools/{pool}/volumes/custom/{name}")),
+                empty_body(),
+                None,
+            )
+            .await
+        {
+            Ok(_) | Err(LxdError::NotFound(_)) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The managed network's IPv4 address (the host side of a bridge), for
+    /// example `10.12.34.1`.
+    pub async fn network_ipv4(&self, network: &str) -> Result<Option<String>> {
+        let metadata = self.get(&format!("/1.0/networks/{network}")).await?;
+        Ok(metadata["config"]["ipv4.address"]
+            .as_str()
+            .and_then(|cidr| cidr.split('/').next())
+            .filter(|ip| ip.parse::<std::net::Ipv4Addr>().is_ok())
+            .map(str::to_owned))
     }
 
     /// Returns the fingerprint behind an image alias, if the alias exists.
@@ -329,6 +463,17 @@ impl Client {
         body: Body,
         content: Option<(u64, &str)>,
     ) -> Result<(StatusCode, Bytes)> {
+        self.raw_with(method, path, body, content, &[]).await
+    }
+
+    async fn raw_with(
+        &self,
+        method: &str,
+        path: &str,
+        body: Body,
+        content: Option<(u64, &str)>,
+        headers: &[(&str, String)],
+    ) -> Result<(StatusCode, Bytes)> {
         let stream = self.connect().await?;
         let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
             .await
@@ -345,6 +490,9 @@ impl Client {
                 .header("Content-Length", length),
             None => request.header("Content-Type", "application/json"),
         };
+        for (name, value) in headers {
+            request = request.header(*name, value);
+        }
         let request = request
             .body(body)
             .map_err(|e| LxdError::Connection(e.to_string()))?;

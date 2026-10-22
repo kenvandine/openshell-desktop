@@ -62,10 +62,10 @@ fn status_group(sandbox: &Sandbox, window: &Window) -> adw::PreferencesGroup {
         .build();
 
     let running = sandbox.state == SandboxState::Running;
-    let status = if running {
-        format!("Running (LXD {})", sandbox.instance_type)
-    } else {
-        "Stopped".to_owned()
+    let status = match sandbox.state {
+        SandboxState::Running => format!("Running (LXD {})", sandbox.instance_type),
+        SandboxState::Stopped => "Stopped".to_owned(),
+        SandboxState::Busy => capitalize(&sandbox.phase),
     };
     group.add(
         &adw::ActionRow::builder()
@@ -136,7 +136,7 @@ fn advisor_group(sandbox: &Sandbox, window: &Window) -> adw::PreferencesGroup {
     }
     for (i, prompt) in sandbox.prompts.iter().enumerate() {
         let row = adw::ActionRow::builder()
-            .title(format!("Blocked: {} {}", prompt.method, prompt.url))
+            .title(format!("Blocked: {} {}", prompt.method, prompt.url).replace("  ", " "))
             .subtitle(format!("Requested by: {}", prompt.binary))
             .build();
         row.add_prefix(&gtk::Image::from_icon_name("dialog-warning-symbolic"));
@@ -247,4 +247,12 @@ fn danger_group(window: &Window) -> adw::PreferencesGroup {
     purge.set_halign(gtk::Align::Center);
     group.add(&purge);
     group
+}
+
+fn capitalize(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
 }

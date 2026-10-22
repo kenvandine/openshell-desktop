@@ -223,7 +223,13 @@ impl ComputeDriver for Service {
                 "the LXD driver does not support external isolation backends",
             ));
         }
-        self.driver.start(&request.sandbox_id).await?;
+        self.driver
+            .start(
+                &request.sandbox_id,
+                &request.generation_id,
+                &request.launch_authentication,
+            )
+            .await?;
         Ok(Response::new(StartSandboxResponse {
             runtime_identity: String::new(),
         }))
