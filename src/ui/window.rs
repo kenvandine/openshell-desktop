@@ -523,10 +523,10 @@ impl Window {
         let connected = imp.connected.get();
         match action {
             // These work on the LXD instance directly, gateway or not.
-            SandboxAction::OpenTerminal if sandbox.instance.is_empty() => {
+            SandboxAction::DebugConsole if sandbox.instance.is_empty() => {
                 self.toast("No LXD instance backs this sandbox yet")
             }
-            SandboxAction::OpenTerminal => console::open(self, &sandbox.instance),
+            SandboxAction::DebugConsole => console::open_debug(self, &sandbox.instance),
             SandboxAction::AddMount if sandbox.instance.is_empty() => {
                 self.toast("No LXD instance backs this sandbox yet")
             }
@@ -542,6 +542,7 @@ impl Window {
 
             // Everything else goes through the gateway.
             _ if !connected => self.toast("This needs the OpenShell gateway, which is not running"),
+            SandboxAction::OpenTerminal => console::open_shell(self, &sandbox.name),
             SandboxAction::ToggleRunning => match sandbox.state {
                 SandboxState::Running => self.send(Command::Stop(sandbox.name)),
                 SandboxState::Stopped => self.send(Command::Start(sandbox.name)),

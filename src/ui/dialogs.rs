@@ -99,6 +99,7 @@ pub fn new_sandbox(
                 cpus: cpus.value() as u32,
                 memory_mb: memory.value() as u32,
                 gpu: gpu.is_active(),
+                ..Default::default()
             },
         );
     });

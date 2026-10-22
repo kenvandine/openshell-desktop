@@ -127,6 +127,15 @@ async fn run(commands: async_channel::Receiver<Command>, events: async_channel::
                     if events.send(Event::GpuSupported(gpu)).await.is_err() {
                         return;
                     }
+                    // A fresh gateway knows no provider types; agents need them
+                    // for their credentials.
+                    if let Err(error) = connected.ensure_profiles().await {
+                        let failed =
+                            Event::Failed(format!("Importing provider profiles failed: {error}"));
+                        if events.send(failed).await.is_err() {
+                            return;
+                        }
+                    }
                     gateway = Some(connected);
                 }
                 Err(error) => {
