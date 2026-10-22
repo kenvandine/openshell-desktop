@@ -51,7 +51,11 @@ fn validate(
     }
 }
 
-pub fn new_sandbox(parent: &impl IsA<gtk::Widget>, done: impl Fn(String, CreateOptions) + 'static) {
+pub fn new_sandbox(
+    parent: &impl IsA<gtk::Widget>,
+    gpu_supported: bool,
+    done: impl Fn(String, CreateOptions) + 'static,
+) {
     let name = adw::EntryRow::builder().title("Name").build();
     let image = adw::EntryRow::builder()
         .title("Image (blank for the gateway default)")
@@ -64,7 +68,12 @@ pub fn new_sandbox(parent: &impl IsA<gtk::Widget>, done: impl Fn(String, CreateO
     memory.set_subtitle("MB; 0 for no limit");
     let gpu = adw::SwitchRow::builder()
         .title("GPU passthrough")
-        .subtitle("Needs a GPU configured for the LXD driver")
+        .subtitle(if gpu_supported {
+            "Pass the GPU configured for the LXD driver into the sandbox"
+        } else {
+            "No GPU is configured for the LXD driver"
+        })
+        .sensitive(gpu_supported)
         .build();
     let fields = form();
     fields.append(&name);

@@ -398,6 +398,23 @@ impl Gateway {
         })
     }
 
+    /// Whether the gateway's compute driver can give a sandbox a GPU.
+    pub async fn gpu_supported(&mut self) -> Result<bool, Error> {
+        let info = self
+            .client
+            .get_gateway_info(openshell_core::proto::GetGatewayInfoRequest {})
+            .await?
+            .into_inner();
+        Ok(info.compute_drivers.iter().any(|driver| {
+            driver
+                .capabilities
+                .as_ref()
+                .and_then(|c| c.resource_capabilities.as_ref())
+                .and_then(|r| r.gpu.as_ref())
+                .is_some_and(|gpu| gpu.default_selection_supported)
+        }))
+    }
+
     pub async fn list(&mut self) -> Result<Vec<SandboxInfo>, Error> {
         let response = self
             .client

@@ -45,6 +45,8 @@ mod imp {
         pub connected_once: Cell<bool>,
         /// Draft chunks already notified about.
         pub seen_prompts: RefCell<std::collections::HashSet<String>>,
+        /// Whether the gateway's compute driver offers GPUs.
+        pub gpu_supported: Cell<bool>,
         /// Why the gateway is unreachable, for the status tooltip.
         pub gateway_error: RefCell<String>,
     }
@@ -181,7 +183,14 @@ impl Window {
                 }
             }
             Event::Done(message) => self.toast(&message),
-            Event::Failed(message) => self.toast(&message),
+            // Failures stay until dismissed: a slow create can fail long
+            // after the dialog closed.
+            Event::Failed(message) => {
+                let toast = adw::Toast::new(&message);
+                toast.set_timeout(0);
+                self.show_toast(toast);
+            }
+            Event::GpuSupported(gpu) => imp.gpu_supported.set(gpu),
         }
         self.update_status();
     }
@@ -279,10 +288,15 @@ impl Window {
         }
         dialogs::new_sandbox(
             self,
+            self.imp().gpu_supported.get(),
             glib::clone!(
                 #[weak(rename_to = win)]
                 self,
-                move |name, options| win.send(Command::Create { name, options })
+                move |name, options| {
+                    // Pulling images can take a while before the gateway answers.
+                    win.toast(&format!("Creating {name}…"));
+                    win.send(Command::Create { name, options })
+                }
             ),
         );
     }
@@ -459,7 +473,10 @@ impl Window {
 
     /// Shows a toast, over the Policy Rules dialog while it is open.
     fn toast(&self, message: &str) {
-        let toast = adw::Toast::new(message);
+        self.show_toast(adw::Toast::new(message));
+    }
+
+    fn show_toast(&self, toast: adw::Toast) {
         let dialog = self
             .imp()
             .policy_dialog
