@@ -77,27 +77,31 @@ parts:
 
   openshell-desktop:
     after: [libghostty-vt]
-    plugin: rust
+    # Built with a rustup toolchain rather than the rust plugin: the code
+    # needs edition 2024 (newer than core24's rustc), and the rust plugin's
+    # rustup check does not see the rustup snap under the GNOME extension.
+    plugin: nil
     source: .
-    rust-channel: stable
-    # The rust plugin installs rust-channel with rustup from this snap.
-    build-snaps:
-      - rustup
-    rust-path:
-      - .
-      - crates/openshell-driver-lxd
     build-packages:
       - cmake
+      - curl
       - libclang-dev
       - pkg-config
     build-environment:
       - PKG_CONFIG_PATH: $CRAFT_STAGE/share/pkgconfig:${PKG_CONFIG_PATH:-}
       - LIBRARY_PATH: $CRAFT_STAGE/lib:${LIBRARY_PATH:-}
+      - RUSTUP_HOME: $CRAFT_PART_BUILD/.rustup
+      - CARGO_HOME: $CRAFT_PART_BUILD/.cargo
     override-pull: |
       craftctl default
       craftctl set version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)+git$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
     override-build: |
-      craftctl default
+      curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
+        | sh -s -- -y --no-modify-path --profile minimal --default-toolchain stable
+      export PATH="$CARGO_HOME/bin:$PATH"
+      cargo build --release --locked --workspace --bins
+      install -Dm755 target/release/openshell-desktop "$CRAFT_PART_INSTALL/bin/openshell-desktop"
+      install -Dm755 target/release/openshell-driver-lxd "$CRAFT_PART_INSTALL/bin/openshell-driver-lxd"
       install -Dm644 data/io.github.kenvandine.OpenShellDesktop.desktop \
         "$CRAFT_PART_INSTALL/usr/share/applications/io.github.kenvandine.OpenShellDesktop.desktop"
       install -Dm644 data/icons/io.github.kenvandine.OpenShellDesktop.svg \
