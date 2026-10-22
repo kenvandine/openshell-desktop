@@ -25,13 +25,16 @@ use crate::lxd::FileMeta;
 
 pub const CHANNEL_ROOT: &str = "/.openshell/channel";
 pub const BOOTSTRAP_PATH: &str = "/.openshell/channel/sandbox/bootstrap.json";
-/// Shared between both instances; the supervisor binds the socket here and
-/// the workload runtime dials it.
-pub const CONTROL_ROOT: &str = "/.openshell/channel/control";
+/// Where the shared control volume is mounted in both instances. LXD will
+/// not change the owner of a mountpoint through its file API, so the socket
+/// lives in a directory the driver creates inside it.
+pub const CONTROL_VOLUME_ROOT: &str = "/.openshell/channel/shared";
+/// The supervisor binds the socket here and the workload runtime dials it.
+pub const CONTROL_ROOT: &str = "/.openshell/channel/shared/control";
 pub const RUNTIME_DESCRIPTOR_PATH: &str = "/.openshell/supervisor/runtime-descriptor.json";
 pub const AUTH_BUNDLE_PATH: &str = "/.openshell/supervisor/auth.json";
 pub const RESTART_METADATA_PATH: &str = "/.openshell/supervisor/restart-metadata.json";
-const CONTROL_SOCKET: &str = "/.openshell/channel/control/control.sock";
+const CONTROL_SOCKET: &str = "/.openshell/channel/shared/control/control.sock";
 const SANDBOX_DIR: &str = "/.openshell/channel/sandbox";
 
 pub const ROLE_WORKLOAD: &str = "workload";

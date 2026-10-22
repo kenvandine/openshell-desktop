@@ -106,7 +106,7 @@ OpenShell isolates a sandbox with two containers, and so does this driver.
 | supervisor | `openshell-sup-<id>` | `/openshell-supervisor`: gateway session, policy engine, egress proxy | a NIC on `lxdbr0` with a static address (see [Supervisor network](#supervisor-network)), or the host network namespace with `--supervisor-network host` |
 
 They share one custom storage volume (`openshell-control-<id>`, mounted at
-`/.openshell/channel/control` in both) that holds the runtime-initiated control
+`/.openshell/channel/shared` in both) whose `control` directory holds the runtime-initiated control
 socket. The supervisor binds it, the workload runtime dials it with retry, and
 the connection is mutually authenticated with per-sandbox mTLS material.
 
@@ -170,7 +170,8 @@ Any failure removes both instances and the volume.
 ### Per-instance settings
 
 - **Init**: `raw.lxc` sets `lxc.init.cmd`, `lxc.init.uid`/`gid`/`groups`,
-  `lxc.init.cwd` and `lxc.no_new_privs = 1`. Unprivileged, nesting off.
+  `lxc.init.cwd`, `lxc.no_new_privs = 1` and `lxc.cap.keep = none` (an empty
+  bounding set, which the runtime checks). Unprivileged, nesting off.
 - **Environment**: OpenShell's supervisor variables go on the supervisor
   (`OPENSHELL_SANDBOX_ID`, `OPENSHELL_ENDPOINT`, the main-process spec, the
   user environment as JSON, …). The agent's environment (image `ENV`, template,

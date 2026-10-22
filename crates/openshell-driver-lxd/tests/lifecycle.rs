@@ -634,7 +634,7 @@ async fn provisions_a_workload_and_supervisor_pair() {
     );
     // The control mount belongs to the workload identity.
     let control = state
-        .file("openshell-sbx-1", "/.openshell/channel/control")
+        .file("openshell-sbx-1", "/.openshell/channel/shared/control")
         .unwrap();
     assert_eq!(
         (

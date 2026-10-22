@@ -730,8 +730,8 @@ impl LxdDriver {
             .set_state(&names.workload, "start", false, -1)
             .await?;
         // The control volume's root belongs to root; both containers run as
-        // the workload identity, so give it the directory. The runtime
-        // retries dialing until the supervisor binds the socket.
+        // the workload identity, so give it a directory inside the volume.
+        // The runtime retries dialing until the supervisor binds the socket.
         self.lxd
             .ensure_dir(
                 &names.workload,
@@ -1294,7 +1294,7 @@ impl LxdDriver {
                 "type": "disk",
                 "pool": self.config.storage_pool,
                 "source": names.volume,
-                "path": isolation::CONTROL_ROOT,
+                "path": isolation::CONTROL_VOLUME_ROOT,
             },
         });
         if let Some(selector) = &plan.gpu {
@@ -1333,7 +1333,7 @@ impl LxdDriver {
                 "type": "disk",
                 "pool": self.config.storage_pool,
                 "source": names.volume,
-                "path": isolation::CONTROL_ROOT,
+                "path": isolation::CONTROL_VOLUME_ROOT,
             },
         });
         if let SupervisorNetwork::Bridge(network) = &self.config.network {
@@ -1873,6 +1873,9 @@ fn raw_lxc(
         format!("lxc.init.gid = {}", identity.gid),
         format!("lxc.init.cwd = {working_dir}"),
         "lxc.no_new_privs = 1".to_owned(),
+        // Dropping to a non-root uid clears the effective capabilities but
+        // not the bounding set, which OpenShell's runtime requires empty.
+        "lxc.cap.keep = none".to_owned(),
     ];
     if !identity.supplementary_gids.is_empty() {
         lines.push(format!(
@@ -2024,7 +2027,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             raw,
-            "lxc.init.cmd = /bin/sh -c \"echo hi there\"\nlxc.init.uid = 1000\nlxc.init.gid = 1000\nlxc.init.cwd = /work\nlxc.no_new_privs = 1\nlxc.init.groups = 44"
+            "lxc.init.cmd = /bin/sh -c \"echo hi there\"\nlxc.init.uid = 1000\nlxc.init.gid = 1000\nlxc.init.cwd = /work\nlxc.no_new_privs = 1\nlxc.cap.keep = none\nlxc.init.groups = 44"
         );
         assert!(raw_lxc(&["say \"hi\"".into()], &identity, "/", &[]).is_err());
         assert!(
