@@ -742,6 +742,14 @@ impl LxdDriver {
                 isolation::control_dir_meta(identity),
             )
             .await?;
+        // A push into a stopped instance lands under the volume's mountpoint,
+        // out of the supervisor's sight; fail with the real cause instead.
+        let workload = self.lxd.instance(&names.workload).await?;
+        if workload.is_none_or(|w| w.status != "Running") {
+            return Err(DriverError::Internal(
+                "the sandbox runtime exited while starting".into(),
+            ));
+        }
         if let Err(error) = self
             .lxd
             .set_state(&names.supervisor, "start", false, -1)
