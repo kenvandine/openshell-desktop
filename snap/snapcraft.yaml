@@ -27,6 +27,14 @@ platforms:
   amd64:
   arm64:
 
+slots:
+  # GApplication owns its application ID on the session bus; strict snaps
+  # may only own names they declare.
+  dbus-openshell-desktop:
+    interface: dbus
+    bus: session
+    name: io.github.kenvandine.OpenShellDesktop
+
 apps:
   openshell-desktop:
     command: bin/openshell-desktop
@@ -39,6 +47,8 @@ apps:
     plugs:
       - lxd
       - network
+    slots:
+      - dbus-openshell-desktop
 
   lxd-driver:
     command: bin/openshell-driver-lxd --socket $SNAP_COMMON/lxd-driver.sock --staging-dir $SNAP_COMMON/staging
