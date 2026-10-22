@@ -10,10 +10,12 @@ use std::time::Duration;
 
 use openshell_core::proto::datamodel::v1::{WorkspaceSelector, workspace_selector::Selection};
 use openshell_core::proto::{
-    ApproveDraftChunkRequest, CreateSandboxRequest, DeleteSandboxRequest, GetDraftPolicyRequest,
-    GetSandboxConfigRequest, ListSandboxesRequest, PolicyChunk, RejectDraftChunkRequest, Sandbox,
-    SandboxPhase, SandboxPolicy, SandboxSpec, StartSandboxRequest, StopSandboxRequest,
-    open_shell_client::OpenShellClient,
+    AddNetworkRule, ApproveDraftChunkRequest, CreateSandboxRequest, DeleteSandboxRequest,
+    GetDraftPolicyRequest, GetSandboxConfigRequest, GpuResourceRequirements, ListSandboxesRequest,
+    NetworkBinary, NetworkEndpoint, NetworkPolicyRule, PolicyChunk, PolicyMergeOperation,
+    RejectDraftChunkRequest, RemoveNetworkEndpoint, RemoveNetworkRule, ResourceRequirements,
+    Sandbox, SandboxPhase, SandboxPolicy, SandboxSpec, StartSandboxRequest, StopSandboxRequest,
+    UpdateConfigRequest, open_shell_client::OpenShellClient, policy_merge_operation::Operation,
 };
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 
@@ -150,10 +152,167 @@ impl SandboxInfo {
 }
 
 /// An allowed outbound endpoint from a sandbox's network policy.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct AllowedEndpoint {
     pub host: String,
     pub port: u16,
+}
+
+/// A named network rule: where it allows traffic to, and for which binaries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyRule {
+    pub name: String,
+    pub endpoints: Vec<AllowedEndpoint>,
+    /// Executables allowed to use the rule; empty means any binary.
+    pub binaries: Vec<String>,
+}
+
+/// The parts of a sandbox policy the app shows. Only the network rules can
+/// change after creation; the gateway rejects edits to everything else.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PolicyView {
+    pub version: u32,
+    /// Whether the workspace directory is writable.
+    pub include_workdir: bool,
+    pub read_only: Vec<String>,
+    pub read_write: Vec<String>,
+    pub run_as_user: String,
+    pub run_as_group: String,
+    /// Landlock compatibility mode, such as `best_effort`.
+    pub landlock: String,
+    /// Sorted by name.
+    pub rules: Vec<PolicyRule>,
+}
+
+impl PolicyView {
+    pub fn from_proto(policy: &SandboxPolicy, version: u32) -> Self {
+        let filesystem = policy.filesystem.clone().unwrap_or_default();
+        let process = policy.process.clone().unwrap_or_default();
+        let mut rules: Vec<_> = policy
+            .network_policies
+            .iter()
+            .map(|(key, rule)| PolicyRule {
+                name: key.clone(),
+                endpoints: endpoints_of(rule),
+                binaries: rule.binaries.iter().map(|b| b.path.clone()).collect(),
+            })
+            .collect();
+        rules.sort_by(|a, b| a.name.cmp(&b.name));
+        Self {
+            version,
+            include_workdir: filesystem.include_workdir,
+            read_only: filesystem.read_only,
+            read_write: filesystem.read_write,
+            run_as_user: process.run_as_user,
+            run_as_group: process.run_as_group,
+            landlock: policy
+                .landlock
+                .as_ref()
+                .map(|l| l.compatibility.clone())
+                .unwrap_or_default(),
+            rules,
+        }
+    }
+
+    /// Every allowed endpoint with the rule that allows it, in display order.
+    pub fn endpoints(&self) -> impl Iterator<Item = (&str, &AllowedEndpoint)> {
+        self.rules
+            .iter()
+            .flat_map(|rule| rule.endpoints.iter().map(|e| (rule.name.as_str(), e)))
+    }
+}
+
+/// One entry per port: an endpoint may list several in `ports`.
+fn endpoints_of(rule: &NetworkPolicyRule) -> Vec<AllowedEndpoint> {
+    let mut endpoints: Vec<_> = rule
+        .endpoints
+        .iter()
+        .flat_map(|e| {
+            let ports = if e.ports.is_empty() {
+                vec![e.port]
+            } else {
+                e.ports.clone()
+            };
+            ports.into_iter().map(|port| AllowedEndpoint {
+                host: e.host.clone(),
+                port: u16::try_from(port).unwrap_or(0),
+            })
+        })
+        .collect();
+    endpoints.sort();
+    endpoints.dedup();
+    endpoints
+}
+
+/// The name the app gives a rule it adds for `host:port`, such as
+/// `desktop_api_github_com_443`. Adding the same endpoint twice reuses it.
+pub fn rule_name_for(host: &str, port: u16) -> String {
+    let mut name = String::from("desktop_");
+    for c in host.chars() {
+        if c.is_ascii_alphanumeric() {
+            name.push(c.to_ascii_lowercase());
+        } else if !name.ends_with('_') {
+            name.push('_');
+        }
+    }
+    if !name.ends_with('_') {
+        name.push('_');
+    }
+    name.push_str(&port.to_string());
+    name
+}
+
+/// What a new sandbox asks for beyond its name.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CreateOptions {
+    /// Blank leaves the choice to the gateway's default.
+    pub image: String,
+    /// CPU cores; 0 means no limit.
+    pub cpus: u32,
+    /// Memory in MiB; 0 means no limit.
+    pub memory_mb: u32,
+    pub gpu: bool,
+}
+
+impl CreateOptions {
+    /// The spec the gateway expects: limits as Kubernetes-style quantities
+    /// under `template.resources.limits`, and a GPU as a resource requirement.
+    pub fn spec(&self) -> SandboxSpec {
+        use prost_types::{Struct, Value, value::Kind};
+        let string = |s: String| Value {
+            kind: Some(Kind::StringValue(s)),
+        };
+        let mut limits = std::collections::BTreeMap::new();
+        if self.cpus > 0 {
+            limits.insert("cpu".to_owned(), string(self.cpus.to_string()));
+        }
+        if self.memory_mb > 0 {
+            limits.insert("memory".to_owned(), string(format!("{}Mi", self.memory_mb)));
+        }
+        let resources = (!limits.is_empty()).then(|| Struct {
+            fields: [(
+                "limits".to_owned(),
+                Value {
+                    kind: Some(Kind::StructValue(Struct { fields: limits })),
+                },
+            )]
+            .into(),
+        });
+        let template = (!self.image.is_empty() || resources.is_some()).then(|| {
+            openshell_core::proto::SandboxTemplate {
+                image: self.image.clone(),
+                resources,
+                ..Default::default()
+            }
+        });
+        SandboxSpec {
+            template,
+            resource_requirements: self.gpu.then_some(ResourceRequirements {
+                gpu: Some(GpuResourceRequirements { count: Some(1) }),
+            }),
+            ..Default::default()
+        }
+    }
 }
 
 /// A blocked request the policy advisor proposes to allow.
@@ -193,26 +352,12 @@ impl Proposal {
     }
 }
 
-pub fn allowed_endpoints(policy: &SandboxPolicy) -> Vec<AllowedEndpoint> {
-    let mut endpoints: Vec<_> = policy
-        .network_policies
-        .values()
-        .flat_map(|rule| rule.endpoints.iter())
-        .map(|e| AllowedEndpoint {
-            host: e.host.clone(),
-            port: u16::try_from(e.port).unwrap_or(0),
-        })
-        .collect();
-    endpoints.sort_by(|a, b| (&a.host, a.port).cmp(&(&b.host, b.port)));
-    endpoints.dedup();
-    endpoints
-}
-
 /// A sandbox with its policy and pending advisor proposals.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     pub info: SandboxInfo,
-    pub allowed: Vec<AllowedEndpoint>,
+    /// `None` while the gateway has no policy for it, such as during provisioning.
+    pub policy: Option<PolicyView>,
     pub proposals: Vec<Proposal>,
 }
 
@@ -275,7 +420,7 @@ impl Gateway {
         let infos = self.list().await?;
         let mut snapshots = Vec::with_capacity(infos.len());
         for info in infos {
-            let allowed = self
+            let policy = self
                 .client
                 .get_sandbox_config(GetSandboxConfigRequest {
                     workspace_scope: workspace(),
@@ -283,9 +428,8 @@ impl Gateway {
                 })
                 .await
                 .ok()
-                .and_then(|r| r.into_inner().policy)
-                .map(|p| allowed_endpoints(&p))
-                .unwrap_or_default();
+                .map(|r| r.into_inner())
+                .and_then(|r| Some(PolicyView::from_proto(r.policy.as_ref()?, r.version)));
             let proposals = self
                 .client
                 .get_draft_policy(GetDraftPolicyRequest {
@@ -302,7 +446,7 @@ impl Gateway {
                 .collect();
             snapshots.push(Snapshot {
                 info,
-                allowed,
+                policy,
                 proposals,
             });
         }
@@ -334,15 +478,89 @@ impl Gateway {
         Ok(())
     }
 
-    pub async fn create(&mut self, name: &str, image: &str) -> Result<SandboxInfo, Error> {
-        // An empty image leaves the choice to the gateway's default.
-        let spec = SandboxSpec {
-            template: (!image.is_empty()).then(|| openshell_core::proto::SandboxTemplate {
-                image: image.into(),
-                ..Default::default()
+    /// Allows `host:port` under a rule of its own, optionally only for one
+    /// executable. Returns the new policy version.
+    pub async fn add_rule(
+        &mut self,
+        sandbox: &str,
+        host: &str,
+        port: u16,
+        binary: Option<&str>,
+    ) -> Result<u32, Error> {
+        let rule_name = rule_name_for(host, port);
+        self.merge(
+            sandbox,
+            Operation::AddRule(AddNetworkRule {
+                rule_name: rule_name.clone(),
+                rule: Some(NetworkPolicyRule {
+                    name: rule_name,
+                    endpoints: vec![NetworkEndpoint {
+                        host: host.into(),
+                        port: port.into(),
+                        ..Default::default()
+                    }],
+                    binaries: binary
+                        .map(|path| NetworkBinary { path: path.into() })
+                        .into_iter()
+                        .collect(),
+                }),
             }),
-            ..Default::default()
-        };
+        )
+        .await
+    }
+
+    /// Removes one endpoint from a rule; the gateway drops a rule left empty.
+    pub async fn remove_endpoint(
+        &mut self,
+        sandbox: &str,
+        rule: &str,
+        host: &str,
+        port: u16,
+    ) -> Result<u32, Error> {
+        self.merge(
+            sandbox,
+            Operation::RemoveEndpoint(RemoveNetworkEndpoint {
+                rule_name: rule.into(),
+                host: host.into(),
+                port: port.into(),
+            }),
+        )
+        .await
+    }
+
+    pub async fn remove_rule(&mut self, sandbox: &str, rule: &str) -> Result<u32, Error> {
+        self.merge(
+            sandbox,
+            Operation::RemoveRule(RemoveNetworkRule {
+                rule_name: rule.into(),
+            }),
+        )
+        .await
+    }
+
+    /// Applies one incremental change to a sandbox's network policy.
+    async fn merge(&mut self, sandbox: &str, operation: Operation) -> Result<u32, Error> {
+        let response = self
+            .client
+            .update_config(UpdateConfigRequest {
+                workspace_scope: workspace(),
+                sandbox: sandbox.into(),
+                merge_operations: vec![PolicyMergeOperation {
+                    operation: Some(operation),
+                }],
+                ..Default::default()
+            })
+            .await?
+            .into_inner();
+        Ok(response.version)
+    }
+
+    pub async fn create(
+        &mut self,
+        name: &str,
+        options: &CreateOptions,
+    ) -> Result<SandboxInfo, Error> {
+        let spec = options.spec();
         let response = self
             .client
             .create_sandbox(CreateSandboxRequest {
@@ -362,7 +580,7 @@ impl Gateway {
                 name: name.into(),
                 state: State::Transitioning,
                 phase: "provisioning".into(),
-                image: image.into(),
+                image: options.image.clone(),
             }))
     }
 
@@ -483,8 +701,8 @@ mod tests {
     }
 
     #[test]
-    fn allowed_endpoints_are_sorted_and_deduplicated() {
-        use openshell_core::proto::{NetworkEndpoint, NetworkPolicyRule};
+    fn policy_view_sorts_rules_and_expands_ports() {
+        use openshell_core::proto::{FilesystemPolicy, NetworkEndpoint, NetworkPolicyRule};
         let rule = |hosts: &[&str]| NetworkPolicyRule {
             endpoints: hosts
                 .iter()
@@ -496,19 +714,81 @@ mod tests {
                 .collect(),
             ..Default::default()
         };
+        let mut multi = rule(&["b.example"]);
+        multi.endpoints[0].ports = vec![80, 443];
         let policy = SandboxPolicy {
+            filesystem: Some(FilesystemPolicy {
+                include_workdir: true,
+                read_only: vec!["/usr".into()],
+                read_write: vec![],
+            }),
             network_policies: [
-                ("a".to_owned(), rule(&["b.example", "a.example"])),
-                ("b".to_owned(), rule(&["a.example"])),
+                (
+                    "z".to_owned(),
+                    rule(&["b.example", "a.example", "a.example"]),
+                ),
+                ("a".to_owned(), multi),
             ]
             .into(),
             ..Default::default()
         };
-        let hosts: Vec<_> = allowed_endpoints(&policy)
-            .into_iter()
-            .map(|e| e.host)
+        let view = PolicyView::from_proto(&policy, 3);
+        assert_eq!(view.version, 3);
+        assert!(view.include_workdir);
+        let flat: Vec<_> = view
+            .endpoints()
+            .map(|(rule, e)| format!("{rule} {}:{}", e.host, e.port))
             .collect();
-        assert_eq!(hosts, ["a.example", "b.example"]);
+        assert_eq!(
+            flat,
+            [
+                "a b.example:80",
+                "a b.example:443",
+                "z a.example:443",
+                "z b.example:443"
+            ]
+        );
+    }
+
+    #[test]
+    fn rule_names_are_stable_identifiers() {
+        assert_eq!(
+            rule_name_for("api.github.com", 443),
+            "desktop_api_github_com_443"
+        );
+        assert_eq!(rule_name_for("*.Example.org", 80), "desktop_example_org_80");
+    }
+
+    #[test]
+    fn create_options_become_limits_and_a_gpu_request() {
+        let spec = CreateOptions {
+            image: String::new(),
+            cpus: 2,
+            memory_mb: 4096,
+            gpu: true,
+        }
+        .spec();
+        let template = spec.template.unwrap();
+        assert!(template.image.is_empty());
+        let limits = match &template.resources.unwrap().fields["limits"].kind {
+            Some(prost_types::value::Kind::StructValue(s)) => s.clone(),
+            other => panic!("limits is {other:?}"),
+        };
+        let quantity = |key: &str| match &limits.fields[key].kind {
+            Some(prost_types::value::Kind::StringValue(v)) => v.clone(),
+            other => panic!("{key} is {other:?}"),
+        };
+        assert_eq!(
+            (quantity("cpu"), quantity("memory")),
+            ("2".into(), "4096Mi".into())
+        );
+        assert_eq!(
+            spec.resource_requirements.unwrap().gpu.unwrap().count,
+            Some(1)
+        );
+
+        let bare = CreateOptions::default().spec();
+        assert!(bare.template.is_none() && bare.resource_requirements.is_none());
     }
 
     #[test]

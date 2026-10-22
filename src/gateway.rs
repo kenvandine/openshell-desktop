@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use openshell_gateway_client::{Config, Error, Gateway, Proposal, Snapshot};
+use openshell_gateway_client::{Config, CreateOptions, Error, Gateway, Proposal, Snapshot};
 
 const POLL: Duration = Duration::from_secs(3);
 
@@ -15,7 +15,7 @@ pub enum Command {
     Refresh,
     Create {
         name: String,
-        image: String,
+        options: CreateOptions,
     },
     Start(String),
     Stop(String),
@@ -28,6 +28,23 @@ pub enum Command {
     Reject {
         sandbox: String,
         chunk_id: String,
+    },
+    /// Allow `host:port`, for one executable or (with `None`) any.
+    AddRule {
+        sandbox: String,
+        host: String,
+        port: u16,
+        binary: Option<String>,
+    },
+    RemoveEndpoint {
+        sandbox: String,
+        rule: String,
+        host: String,
+        port: u16,
+    },
+    RemoveRule {
+        sandbox: String,
+        rule: String,
     },
 }
 
@@ -149,8 +166,8 @@ struct Outcome {
 async fn execute(gateway: &mut Gateway, command: Command) -> Result<Outcome, Error> {
     let message = match command {
         Command::Refresh => None,
-        Command::Create { name, image } => {
-            gateway.create(&name, &image).await?;
+        Command::Create { name, options } => {
+            gateway.create(&name, &options).await?;
             Some(format!("Creating {name}"))
         }
         Command::Start(name) => {
@@ -172,6 +189,32 @@ async fn execute(gateway: &mut Gateway, command: Command) -> Result<Outcome, Err
         Command::Reject { sandbox, chunk_id } => {
             gateway.reject(&sandbox, &chunk_id).await?;
             None
+        }
+        Command::AddRule {
+            sandbox,
+            host,
+            port,
+            binary,
+        } => {
+            let version = gateway
+                .add_rule(&sandbox, &host, port, binary.as_deref())
+                .await?;
+            Some(format!("Allowed {host}:{port} (policy version {version})"))
+        }
+        Command::RemoveEndpoint {
+            sandbox,
+            rule,
+            host,
+            port,
+        } => {
+            let version = gateway
+                .remove_endpoint(&sandbox, &rule, &host, port)
+                .await?;
+            Some(format!("Removed {host}:{port} (policy version {version})"))
+        }
+        Command::RemoveRule { sandbox, rule } => {
+            let version = gateway.remove_rule(&sandbox, &rule).await?;
+            Some(format!("Removed rule {rule} (policy version {version})"))
         }
     };
     Ok(Outcome { message })

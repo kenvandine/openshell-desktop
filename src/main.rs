@@ -1,5 +1,6 @@
 mod gateway;
 mod model;
+mod settings;
 mod terminal;
 mod ui;
 
@@ -55,6 +56,30 @@ fn install_actions(app: &adw::Application) {
     let show_window = gtk::gio::ActionEntry::builder("show-window")
         .activate(|app: &adw::Application, _, _| app.activate())
         .build();
-    app.add_action_entries([about, quit, show_window]);
+    // Targets of a blocked-request notification's buttons, with the sandbox
+    // name and draft chunk ID as parameter.
+    let answer = |name: &str, allow: bool| {
+        gtk::gio::ActionEntry::builder(name)
+            .parameter_type(Some(&<(String, String)>::static_variant_type()))
+            .activate(move |app: &adw::Application, _, target| {
+                let Some((sandbox, chunk_id)) = target.and_then(|t| t.get::<(String, String)>())
+                else {
+                    return;
+                };
+                app.activate();
+                if let Some(window) = app.active_window().and_downcast::<ui::window::Window>() {
+                    window.answer_prompt(&sandbox, &chunk_id, allow);
+                }
+            })
+            .build()
+    };
+    app.add_action_entries([
+        about,
+        quit,
+        show_window,
+        answer("allow-request", true),
+        answer("ignore-request", false),
+    ]);
     app.set_accels_for_action("app.quit", &["<Control>q"]);
+    app.set_accels_for_action("win.preferences", &["<Control>comma"]);
 }

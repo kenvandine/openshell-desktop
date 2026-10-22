@@ -8,5 +8,6 @@ description = "Client for the OpenShell gateway API used by openshell-desktop"
 [dependencies]
 # Same pinned revision as the LXD driver and the bundled gateway.
 openshell-core = { git = "https://github.com/NVIDIA/OpenShell", rev = "39d95b42cb403d883e2f545a3861131ccd3d2ebf", default-features = false }
+prost-types = "0.14"
 thiserror = "2"
 tonic = { version = "0.14", features = ["transport", "tls-aws-lc"] }

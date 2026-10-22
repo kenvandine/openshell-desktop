@@ -14,7 +14,9 @@ pub enum SandboxAction {
     AllowDomain(usize),
     IgnorePrompt(usize),
     AddMount,
+    RemoveMount(usize),
     AddRule,
+    RemoveRule(usize),
     TerminateAndPurge,
 }
 
@@ -156,6 +158,7 @@ fn advisor_group(sandbox: &Sandbox, window: &Window) -> adw::PreferencesGroup {
 fn mounts_group(sandbox: &Sandbox, window: &Window) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder()
         .title("Filesystem Mounts")
+        .description("Host folders shared with the sandbox")
         .build();
     group.set_header_suffix(Some(&icon_button(
         "list-add-symbolic",
@@ -164,11 +167,17 @@ fn mounts_group(sandbox: &Sandbox, window: &Window) -> adw::PreferencesGroup {
         window,
     )));
 
-    for mount in &sandbox.mounts {
+    if sandbox.mounts.is_empty() {
+        group.add(
+            &adw::ActionRow::builder()
+                .title("No host folders mounted")
+                .build(),
+        );
+    }
+    for (i, mount) in sandbox.mounts.iter().enumerate() {
         let icon = match mount.access {
             Access::ReadWrite => "folder-symbolic",
             Access::ReadOnly => "changes-prevent-symbolic",
-            Access::Hidden => "view-conceal-symbolic",
         };
         let row = adw::ActionRow::builder()
             .title(&mount.host)
@@ -178,6 +187,12 @@ fn mounts_group(sandbox: &Sandbox, window: &Window) -> adw::PreferencesGroup {
         let access = gtk::Label::new(Some(mount.access.short_label()));
         access.add_css_class("dim-label");
         row.add_suffix(&access);
+        row.add_suffix(&icon_button(
+            "user-trash-symbolic",
+            "Remove mount",
+            SandboxAction::RemoveMount(i),
+            window,
+        ));
         group.add(&row);
     }
     group
@@ -202,37 +217,55 @@ fn network_group(sandbox: &Sandbox, window: &Window) -> adw::PreferencesGroup {
                 .build(),
         );
     }
-    for rule in &sandbox.rules {
+    for (i, rule) in sandbox.rules.iter().enumerate() {
         let row = adw::ActionRow::builder()
             .title(format!("{}:{}", rule.host, rule.port))
+            .subtitle(&rule.rule)
             .build();
         row.add_prefix(&gtk::Image::from_icon_name("object-select-symbolic"));
+        row.add_suffix(&icon_button(
+            "user-trash-symbolic",
+            "Remove rule",
+            SandboxAction::RemoveRule(i),
+            window,
+        ));
         group.add(&row);
     }
     group
 }
 
+/// Limits are part of the sandbox's spec, which the gateway fixes at creation.
 fn resources_group(sandbox: &Sandbox) -> adw::PreferencesGroup {
-    let group = adw::PreferencesGroup::builder().title("Resources").build();
-
-    let cpu = adw::SpinRow::with_range(1.0, 64.0, 1.0);
-    cpu.set_title("CPU limit");
-    cpu.set_subtitle("limits.cpu");
-    cpu.set_value(sandbox.cpu_limit as f64);
-    group.add(&cpu);
-
-    let memory = adw::SpinRow::with_range(256.0, 65536.0, 256.0);
-    memory.set_title("Memory limit (MB)");
-    memory.set_subtitle("limits.memory");
-    memory.set_value(sandbox.memory_limit_mb as f64);
-    group.add(&memory);
-
-    let gpu = adw::SwitchRow::builder()
-        .title("GPU passthrough")
-        .subtitle("Pass host GPU (nvidia.com/gpu or /dev/dri) into the sandbox")
-        .active(sandbox.gpu_passthrough)
+    let group = adw::PreferencesGroup::builder()
+        .title("Resources")
+        .description("Set when the sandbox is created")
         .build();
-    group.add(&gpu);
+    let row = |title: &str, value: String| {
+        let row = adw::ActionRow::builder().title(title).build();
+        let label = gtk::Label::new(Some(&value));
+        label.add_css_class("dim-label");
+        row.add_suffix(&label);
+        row
+    };
+    group.add(&row(
+        "CPU limit",
+        match sandbox.cpu_limit {
+            0 => "No limit".to_owned(),
+            1 => "1 core".to_owned(),
+            n => format!("{n} cores"),
+        },
+    ));
+    group.add(&row(
+        "Memory limit",
+        match sandbox.memory_limit_mb {
+            0 => "No limit".to_owned(),
+            mb => format_mb(mb),
+        },
+    ));
+    group.add(&row(
+        "GPU passthrough",
+        if sandbox.gpu_passthrough { "On" } else { "Off" }.to_owned(),
+    ));
     group
 }
 

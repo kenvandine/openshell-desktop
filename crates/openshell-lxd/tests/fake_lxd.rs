@@ -17,6 +17,8 @@ use tungstenite::{Message, WebSocket};
 enum Seen {
     Exec(Value),
     Control(Value),
+    Patch(Value),
+    Put(Value),
 }
 
 fn read_request(stream: &mut UnixStream) -> (String, Vec<String>, Vec<u8>) {
@@ -85,6 +87,31 @@ fn serve(stream: UnixStream, seen: Sender<Seen>) {
                 "expanded_devices": {"work": {"type": "disk", "source": "/home/me/work", "path": "/workspace"}},
                 "state": {"memory": {"usage": 104857600}}
             }]}),
+        ),
+        "/1.0/instances/c1" if request_line.starts_with("PATCH") => {
+            seen.send(Seen::Patch(serde_json::from_slice(&body).unwrap()))
+                .unwrap();
+            respond(stream, json!({"type": "sync", "metadata": {}}));
+        }
+        "/1.0/instances/c1" if request_line.starts_with("GET") => respond(
+            stream,
+            json!({"type": "sync", "metadata": {
+                "name": "c1", "config": {"limits.memory": "2GiB"},
+                "devices": {"mount-work": {"type": "disk", "source": "/home/me/work", "path": "/sandbox/work"}},
+                "profiles": ["default"]
+            }}),
+        ),
+        "/1.0/instances/c1" if request_line.starts_with("PUT") => {
+            seen.send(Seen::Put(serde_json::from_slice(&body).unwrap()))
+                .unwrap();
+            respond(
+                stream,
+                json!({"type": "async", "operation": "/1.0/operations/op2", "metadata": {}}),
+            );
+        }
+        "/1.0/operations/op2/wait?timeout=30" => respond(
+            stream,
+            json!({"type": "sync", "metadata": {"status_code": 200, "err": ""}}),
         ),
         "/1.0/instances/missing/exec" => respond(
             stream,
@@ -221,4 +248,35 @@ fn console_reports_lxd_errors() {
         next_event(&events),
         ConsoleEvent::Error("Instance not found".into())
     );
+}
+
+#[test]
+fn adds_and_removes_host_folder_mounts() {
+    let (_dir, client, seen) = fake_lxd();
+    let disk = openshell_lxd::Disk {
+        source: "/home/me/data".into(),
+        path: "/sandbox/data".into(),
+        readonly: true,
+    };
+    client.add_disk("c1", "mount-sandbox-data", &disk).unwrap();
+    let Seen::Patch(patch) = seen.recv_timeout(Duration::from_secs(5)).unwrap() else {
+        panic!("expected a PATCH");
+    };
+    assert_eq!(
+        patch,
+        json!({"devices": {"mount-sandbox-data": {
+            "type": "disk", "source": "/home/me/data", "path": "/sandbox/data",
+            "readonly": "true", "shift": "true"
+        }}})
+    );
+
+    client.remove_device("c1", "mount-work").unwrap();
+    let Seen::Put(put) = seen.recv_timeout(Duration::from_secs(5)).unwrap() else {
+        panic!("expected a PUT");
+    };
+    assert_eq!(put["devices"], json!({}));
+    assert_eq!(put["config"]["limits.memory"], "2GiB");
+
+    let error = client.remove_device("c1", "root").unwrap_err();
+    assert!(error.contains("profile"), "{error}");
 }
