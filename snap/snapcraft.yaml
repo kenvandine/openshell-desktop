@@ -14,7 +14,9 @@ description: |
     sudo snap connect openshell-desktop:lxd lxd:lxd
     systemctl --user enable --now snap.openshell-desktop.lxd-driver.service \
       snap.openshell-desktop.gateway.service
-adopt-info: openshell-desktop
+# Kept equal to Cargo.toml's version. A static version avoids `craftctl`
+# version scriptlets, which collide with snapcraft's own git handling.
+version: '0.1.0'
 license: Apache-2.0
 base: core24
 grade: devel
@@ -84,7 +86,8 @@ apps:
 parts:
   libghostty-vt:
     plugin: nil
-    source: .
+    # Only the build script, so edits elsewhere never rebuild Ghostty.
+    source: scripts
     source-type: local
     build-packages:
       - curl
@@ -103,10 +106,41 @@ parts:
         | tar -xJ --strip-components=1 -C "$CRAFT_PART_BUILD/zig"
       export PATH="$CRAFT_PART_BUILD/zig:$PATH"
       # Zig cannot parse the build instance's resolv.conf; give it a clean one.
-      ZIG_CLEAN_RESOLV_CONF=1 scripts/build-libghostty-vt.sh "$CRAFT_PART_INSTALL"
+      ZIG_CLEAN_RESOLV_CONF=1 ./build-libghostty-vt.sh "$CRAFT_PART_INSTALL"
     # Headers and the .pc file are only needed to build the app.
     prime:
       - lib/libghostty-vt*.so*
+
+  # The OpenShell gateway lives in its own part, with no source, so editing
+  # this repository never rebuilds it; it is rebuilt only when this part
+  # changes. It is pinned to the revision the driver builds against, without
+  # the in-tree Docker/Podman/Kubernetes drivers: sandboxes here are LXD
+  # instances behind openshell-driver-lxd.
+  openshell-gateway:
+    plugin: nil
+    build-packages:
+      - cmake
+      - curl
+      - git
+      - libclang-dev
+      # The gateway links its policy prover against the system libz3.
+      - libz3-dev
+      - pkg-config
+    stage-packages:
+      - libz3-4
+    build-environment:
+      - RUSTUP_HOME: $CRAFT_PART_BUILD/.rustup
+      - CARGO_HOME: $CRAFT_PART_BUILD/.cargo
+      - CARGO_TARGET_DIR: $CRAFT_PART_BUILD/target
+    override-build: |
+      if [ ! -x "$CARGO_HOME/bin/cargo" ]; then
+        curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
+          | sh -s -- -y --no-modify-path --profile minimal --default-toolchain stable
+      fi
+      export PATH="$CARGO_HOME/bin:$PATH"
+      cargo install --git https://github.com/NVIDIA/OpenShell \
+        --rev 39d95b42cb403d883e2f545a3861131ccd3d2ebf --locked \
+        --no-default-features --root "$CRAFT_PART_INSTALL" openshell-gateway
 
   openshell-desktop:
     after: [libghostty-vt]
@@ -115,39 +149,25 @@ parts:
     # rustup check does not see the rustup snap under the GNOME extension.
     plugin: nil
     source: .
-    # A git source makes `craftctl default` set the version itself, which then
-    # collides with the explicit set below; the version comes from Cargo.toml.
-    source-type: local
     build-packages:
       - cmake
       - curl
       - libclang-dev
-      # openshell-gateway links its policy prover against the system libz3.
-      - libz3-dev
       - pkg-config
-    stage-packages:
-      - libz3-4
     build-environment:
       - PKG_CONFIG_PATH: $CRAFT_STAGE/share/pkgconfig:${PKG_CONFIG_PATH:-}
       - LIBRARY_PATH: $CRAFT_STAGE/lib:${LIBRARY_PATH:-}
       - RUSTUP_HOME: $CRAFT_PART_BUILD/.rustup
       - CARGO_HOME: $CRAFT_PART_BUILD/.cargo
-    override-pull: |
-      craftctl default
-      craftctl set version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)+git$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
     override-build: |
-      curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
-        | sh -s -- -y --no-modify-path --profile minimal --default-toolchain stable
+      # The toolchain and cargo's target directory live in the part's build
+      # directory, which snapcraft keeps when only the sources change.
+      if [ ! -x "$CARGO_HOME/bin/cargo" ]; then
+        curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
+          | sh -s -- -y --no-modify-path --profile minimal --default-toolchain stable
+      fi
       export PATH="$CARGO_HOME/bin:$PATH"
       cargo build --release --locked --workspace --bins
-      # The OpenShell gateway, pinned to the revision the driver builds
-      # against and without the in-tree Docker/Podman/Kubernetes drivers:
-      # sandboxes here are LXD instances behind openshell-driver-lxd.
-      cargo install --git https://github.com/NVIDIA/OpenShell \
-        --rev 39d95b42cb403d883e2f545a3861131ccd3d2ebf --locked \
-        --no-default-features --root "$CRAFT_PART_BUILD/gateway" openshell-gateway
-      install -Dm755 "$CRAFT_PART_BUILD/gateway/bin/openshell-gateway" \
-        "$CRAFT_PART_INSTALL/bin/openshell-gateway"
       install -Dm755 snap/local/gateway-wrapper "$CRAFT_PART_INSTALL/bin/gateway-wrapper"
       install -Dm755 target/release/openshell-desktop "$CRAFT_PART_INSTALL/bin/openshell-desktop"
       install -Dm755 target/release/openshell-driver-lxd "$CRAFT_PART_INSTALL/bin/openshell-driver-lxd"
