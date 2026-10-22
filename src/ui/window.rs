@@ -402,16 +402,7 @@ impl Window {
                     .description("Create one with the New Sandbox button.")
                     .build()
             } else {
-                adw::StatusPage::builder()
-                    .icon_name("network-offline-symbolic")
-                    .title("OpenShell Gateway Not Running")
-                    .description(format!(
-                        "{}\n\nStart it with\n<tt>systemctl --user enable --now \
-                         snap.openshell-desktop.gateway.service \
-                         snap.openshell-desktop.lxd-driver.service</tt>",
-                        glib::markup_escape_text(&self.gateway_status())
-                    ))
-                    .build()
+                self.gateway_not_running_page()
             };
             imp.detail.set_child(Some(&page));
             return;
@@ -419,6 +410,44 @@ impl Window {
         let sandbox = &sandboxes[imp.selected.get()];
         imp.content_page.set_title(&sandbox.name);
         imp.detail.set_child(Some(&detail::build(sandbox, self)));
+    }
+
+    /// Explains why the list is empty, with the command that starts the
+    /// gateway and a button that copies it.
+    fn gateway_not_running_page(&self) -> adw::StatusPage {
+        let command = gtk::Label::builder()
+            .label(START_GATEWAY)
+            .selectable(true)
+            .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
+            .justify(gtk::Justification::Center)
+            .css_classes(["monospace"])
+            .build();
+        let copy = gtk::Button::builder()
+            .label("Copy Command")
+            .halign(gtk::Align::Center)
+            .css_classes(["pill", "suggested-action"])
+            .build();
+        copy.connect_clicked(glib::clone!(
+            #[weak(rename_to = win)]
+            self,
+            move |button| {
+                button.clipboard().set_text(START_GATEWAY);
+                win.toast("Command copied");
+            }
+        ));
+        let child = gtk::Box::new(gtk::Orientation::Vertical, 18);
+        child.append(&command);
+        child.append(&copy);
+        adw::StatusPage::builder()
+            .icon_name("network-offline-symbolic")
+            .title("OpenShell Gateway Not Running")
+            .description(format!(
+                "{}\n\nStart it in a terminal with",
+                glib::markup_escape_text(&self.gateway_status())
+            ))
+            .child(&child)
+            .build()
     }
 
     /// Shows a toast, over the Policy Rules dialog while it is open.
@@ -646,6 +675,10 @@ fn lxd_sandboxes() -> Vec<Sandbox> {
         })
         .unwrap_or_default()
 }
+
+/// Enables the snap's gateway and LXD driver for the current user.
+const START_GATEWAY: &str = "systemctl --user enable --now \
+     snap.openshell-desktop.gateway.service snap.openshell-desktop.lxd-driver.service";
 
 fn notification_id(chunk_id: &str) -> String {
     format!("blocked-{chunk_id}")
