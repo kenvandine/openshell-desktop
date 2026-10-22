@@ -90,7 +90,12 @@ impl Window {
         let imp = self.imp();
         let live: Vec<Sandbox> = lxd::Client::default()
             .instances()
-            .map(|instances| instances.iter().map(Sandbox::from_instance).collect())
+            .map(|instances| {
+                lxd::list_sandboxes(&instances)
+                    .iter()
+                    .map(Sandbox::from_listed)
+                    .collect()
+            })
             .unwrap_or_default();
         imp.live.set(!live.is_empty());
         imp.sandboxes.replace(if live.is_empty() {
@@ -188,7 +193,9 @@ impl Window {
                 SandboxAction::IgnorePrompt(i) => {
                     sandbox.prompts.remove(i);
                 }
-                SandboxAction::OpenTerminal if imp.live.get() => console::open(self, &sandbox.name),
+                SandboxAction::OpenTerminal if imp.live.get() => {
+                    console::open(self, &sandbox.instance)
+                }
                 SandboxAction::OpenTerminal => {
                     message = Some("The console needs LXD; this is sample data".into())
                 }

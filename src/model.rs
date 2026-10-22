@@ -3,7 +3,7 @@
 //! Sandboxes come from live LXD instances when LXD is reachable, otherwise
 //! from sample data, until the app talks to the OpenShell gateway.
 
-use openshell_lxd::{Instance, parse_memory_mb};
+use openshell_lxd::{Listed, parse_memory_mb};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxState {
@@ -53,7 +53,10 @@ pub struct AdvisorPrompt {
 
 #[derive(Debug, Clone)]
 pub struct Sandbox {
+    /// Display name.
     pub name: String,
+    /// LXD instance name, which the console execs into.
+    pub instance: String,
     pub runtime: String,
     pub profile: String,
     pub state: SandboxState,
@@ -81,9 +84,10 @@ impl Sandbox {
 }
 
 impl Sandbox {
-    /// A sandbox view of a live LXD instance. Policy fields stay empty until
+    /// A sandbox view of a listed LXD instance. Policy fields stay empty until
     /// the OpenShell gateway provides them.
-    pub fn from_instance(instance: &Instance) -> Self {
+    pub fn from_listed(listed: &Listed) -> Self {
+        let instance = listed.instance;
         let config = |key: &str| instance.expanded_config.get(key).map(String::as_str);
         let mounts = instance
             .expanded_devices
@@ -103,7 +107,11 @@ impl Sandbox {
             .collect();
 
         Sandbox {
-            name: instance.name.clone(),
+            name: instance
+                .openshell_sandbox_name()
+                .unwrap_or(&instance.name)
+                .to_owned(),
+            instance: instance.name.clone(),
             runtime: if instance.kind == "virtual-machine" {
                 "VM"
             } else {
@@ -111,7 +119,7 @@ impl Sandbox {
             }
             .into(),
             profile: instance.profiles.join(", "),
-            state: if instance.status == "Running" {
+            state: if listed.running {
                 SandboxState::Running
             } else {
                 SandboxState::Stopped
@@ -172,6 +180,7 @@ pub fn sample_sandboxes() -> Vec<Sandbox> {
     vec![
         Sandbox {
             name: "code-eval-01".into(),
+            instance: "code-eval-01".into(),
             runtime: "Python".into(),
             profile: "Code Assistant".into(),
             state: SandboxState::Running,
@@ -200,6 +209,7 @@ pub fn sample_sandboxes() -> Vec<Sandbox> {
         },
         Sandbox {
             name: "data-scraper".into(),
+            instance: "data-scraper".into(),
             runtime: "Node".into(),
             profile: "Web Researcher".into(),
             state: SandboxState::Stopped,
@@ -215,6 +225,7 @@ pub fn sample_sandboxes() -> Vec<Sandbox> {
         },
         Sandbox {
             name: "doc-indexer".into(),
+            instance: "doc-indexer".into(),
             runtime: "Rust".into(),
             profile: "Fully Offline".into(),
             state: SandboxState::Running,
