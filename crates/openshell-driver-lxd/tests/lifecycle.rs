@@ -620,6 +620,11 @@ async fn provisions_a_workload_and_supervisor_pair() {
     );
     assert!(raw.contains("lxc.sysctl.net.ipv4.ip_unprivileged_port_start = 0"));
     assert!(
+        raw.contains("lxc.mount.entry = tmpfs run/openshell-supervisor-ca/material tmpfs rw,noexec,nosuid,nodev,size=1m,uid=1000,gid=1000,mode=0755,create=dir 0 0"),
+        "{raw}"
+    );
+    assert_eq!(workload.config["limits.processes"], "2048");
+    assert!(
         !workload
             .config
             .keys()

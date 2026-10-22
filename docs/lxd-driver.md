@@ -175,7 +175,9 @@ Any failure removes both instances and the volume.
   workload also gets `lxc.net.0.type = empty` with `flags = up` (loopback up,
   no NIC; the runtime's socket mediation needs loopback) and
   `lxc.sysctl.net.ipv4.ip_unprivileged_port_start = 0` for its DNS relay on
-  127.0.0.53:53.
+  127.0.0.53:53, a 1 MiB tmpfs owned by the workload identity at
+  `/run/openshell-supervisor-ca/material` (where the runtime installs the
+  supervisor's CA), and `limits.processes = 2048`.
 - **Environment**: OpenShell's supervisor variables go on the supervisor
   (`OPENSHELL_SANDBOX_ID`, `OPENSHELL_ENDPOINT`, the main-process spec, the
   user environment as JSON, …). The agent's environment (image `ENV`, template,

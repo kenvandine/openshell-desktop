@@ -527,7 +527,7 @@ impl LxdDriver {
                     ],
                     &identity,
                     "/",
-                    &WORKLOAD_NETWORK.map(str::to_owned),
+                    &workload_lxc(&identity),
                 )?,
             ),
             (KEY_UID.to_owned(), identity.uid.to_string()),
@@ -1337,6 +1337,11 @@ impl LxdDriver {
             config.insert(key.to_owned(), Value::String(value));
         };
         set(KEY_IMAGE, plan.image.clone());
+        // OpenShell's container drivers cap PIDs; the runtime warns without.
+        set(
+            "limits.processes",
+            openshell_core::config::DEFAULT_SANDBOX_PIDS_LIMIT.to_string(),
+        );
         if !plan.labels.is_empty() {
             set(
                 KEY_LABELS,
@@ -1557,6 +1562,20 @@ const WORKLOAD_NETWORK: [&str; 3] = [
     "lxc.net.0.flags = up",
     "lxc.sysctl.net.ipv4.ip_unprivileged_port_start = 0",
 ];
+
+/// `raw.lxc` lines for the workload besides its init: loopback networking,
+/// and a memory-backed directory the runtime installs the supervisor's CA
+/// into, owned by the workload identity as OpenShell's Docker driver mounts
+/// it.
+fn workload_lxc(identity: &Identity) -> Vec<String> {
+    let ca_dir = openshell_sandbox_backend::SUPERVISOR_CA_RUNTIME_DIR.trim_start_matches('/');
+    let mut lines: Vec<String> = WORKLOAD_NETWORK.map(str::to_owned).to_vec();
+    lines.push(format!(
+        "lxc.mount.entry = tmpfs {ca_dir} tmpfs rw,noexec,nosuid,nodev,size=1m,uid={},gid={},mode=0755,create=dir 0 0",
+        identity.uid, identity.gid
+    ));
+    lines
+}
 
 /// The supervisor's address on its bridge, which liblxc configures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
