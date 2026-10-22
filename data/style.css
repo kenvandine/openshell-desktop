@@ -1,0 +1,16 @@
+.status-pill {
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-weight: bold;
+  font-size: 0.9em;
+}
+.status-pill.active {
+  background-color: alpha(@success_color, 0.15);
+  color: @success_color;
+}
+.status-pill.inactive {
+  background-color: alpha(@error_color, 0.15);
+  color: @error_color;
+}
+.state-dot.running { color: @success_color; }
+.state-dot.stopped { color: @dim_label_color; }
