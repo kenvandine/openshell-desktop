@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      PKG_CONFIG_PATH: ${{ github.workspace }}/vendor/ghostty-vt/share/pkgconfig
+      LD_LIBRARY_PATH: ${{ github.workspace }}/vendor/ghostty-vt/lib
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libclang-dev xvfb
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache libghostty-vt
+        id: ghostty-cache
+        uses: actions/cache@v4
+        with:
+          path: vendor/ghostty-vt
+          key: ghostty-vt-${{ hashFiles('scripts/build-libghostty-vt.sh') }}
+      - uses: mlugg/setup-zig@v2
+        if: steps.ghostty-cache.outputs.cache-hit != 'true'
+        with:
+          version: 0.17.0
+      - name: Build libghostty-vt
+        if: steps.ghostty-cache.outputs.cache-hit != 'true'
+        run: scripts/build-libghostty-vt.sh
+
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - name: Smoke-test the app under Xvfb
+        run: |
+          cargo build
+          timeout --preserve-status -s INT 5 xvfb-run -a target/debug/openshell-desktop || status=$?
+          # SIGINT after 5 seconds means it started and kept running.
+          [ "${status:-0}" = 130 ] || [ "${status:-0}" = 0 ]
