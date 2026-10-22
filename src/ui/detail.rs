@@ -69,10 +69,16 @@ fn status_group(sandbox: &Sandbox, window: &Window) -> adw::PreferencesGroup {
         SandboxState::Stopped => "Stopped".to_owned(),
         SandboxState::Busy => capitalize(&sandbox.phase),
     };
+    let status = if sandbox.status_detail.is_empty() {
+        status
+    } else {
+        format!("{status}: {}", sandbox.status_detail)
+    };
     group.add(
         &adw::ActionRow::builder()
             .title("Status")
             .subtitle(status)
+            .subtitle_selectable(true)
             .build(),
     );
 

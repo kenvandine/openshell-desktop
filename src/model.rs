@@ -84,6 +84,8 @@ pub struct Sandbox {
     pub state: SandboxState,
     /// The gateway's phase for this sandbox, empty for LXD-only data.
     pub phase: String,
+    /// Why the gateway says it is not ready, if it says.
+    pub status_detail: String,
     /// "Container" or "Virtual Machine".
     pub instance_type: String,
     pub uptime_mins: Option<u32>,
@@ -157,6 +159,7 @@ impl Sandbox {
                 SandboxState::Stopped
             },
             phase: String::new(),
+            status_detail: String::new(),
             instance_type: if instance.kind == "virtual-machine" {
                 "Virtual Machine"
             } else {
@@ -197,6 +200,7 @@ impl Sandbox {
             profile: info.image.clone(),
             state: SandboxState::Stopped,
             phase: String::new(),
+            status_detail: String::new(),
             instance_type: "Container".into(),
             uptime_mins: None,
             memory_used_mb: 0,
@@ -215,6 +219,7 @@ impl Sandbox {
             State::Transitioning | State::Failed => SandboxState::Busy,
         };
         sandbox.phase = info.phase.clone();
+        sandbox.status_detail = info.detail.clone();
         sandbox.rules = snapshot
             .policy
             .iter()

@@ -123,6 +123,9 @@ pub struct SandboxInfo {
     pub name: String,
     pub state: State,
     pub phase: String,
+    /// Why the sandbox is not ready, from its unmet conditions; empty when
+    /// it is.
+    pub detail: String,
     pub image: String,
 }
 
@@ -141,6 +144,19 @@ impl SandboxInfo {
                 .as_str_name()
                 .trim_start_matches("SANDBOX_PHASE_")
                 .to_lowercase(),
+            detail: sandbox
+                .status
+                .as_ref()
+                .map(|status| {
+                    status
+                        .conditions
+                        .iter()
+                        .filter(|c| c.status != "True" && !c.message.is_empty())
+                        .map(|c| c.message.clone())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                })
+                .unwrap_or_default(),
             image: sandbox
                 .spec
                 .as_ref()
@@ -597,6 +613,7 @@ impl Gateway {
                 name: name.into(),
                 state: State::Transitioning,
                 phase: "provisioning".into(),
+                detail: String::new(),
                 image: options.image.clone(),
             }))
     }
