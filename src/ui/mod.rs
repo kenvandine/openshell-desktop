@@ -1,3 +1,4 @@
+pub mod accounts;
 pub mod console;
 pub mod detail;
 pub mod dialogs;
