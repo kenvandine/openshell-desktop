@@ -153,6 +153,113 @@ impl Importer {
     }
 }
 
+impl Importer {
+    /// Returns one regular file from the image's merged filesystem, caching
+    /// it on disk by manifest digest. The runtime image that ships
+    /// `openshell-sandbox` is a single binary, so this avoids importing it
+    /// into LXD at all.
+    pub async fn extract_file(
+        &self,
+        reference: &str,
+        path: &str,
+    ) -> Result<ExtractedFile, ImageError> {
+        let reference: Reference = reference
+            .parse()
+            .map_err(|e| ImageError::InvalidReference(format!("{reference}: {e}")))?;
+        let auth = RegistryAuth::Anonymous;
+        let (manifest, digest, _) = self
+            .registry
+            .pull_manifest_and_config(&reference, &auth)
+            .await
+            .map_err(|e| ImageError::Registry(e.to_string()))?;
+
+        let cache = self.staging_dir.join("files").join(format!(
+            "{}-{}",
+            alias_for_digest(&digest),
+            path.trim_matches('/').replace('/', "_")
+        ));
+        if let Ok(content) = std::fs::read(&cache) {
+            return Ok(ExtractedFile {
+                manifest_digest: digest,
+                content,
+            });
+        }
+
+        let _guard = self.lock.lock().await;
+        std::fs::create_dir_all(&self.staging_dir)
+            .map_err(|e| ImageError::Unpack(format!("{}: {e}", self.staging_dir.display())))?;
+        let staging = tempfile::tempdir_in(&self.staging_dir)
+            .map_err(|e| ImageError::Unpack(format!("{}: {e}", self.staging_dir.display())))?;
+        let mut layers = Vec::with_capacity(manifest.layers.len());
+        for (index, layer) in manifest.layers.iter().enumerate() {
+            let layer_path = staging.path().join(format!("layer-{index}"));
+            let file = tokio::fs::File::create(&layer_path)
+                .await
+                .map_err(|e| ImageError::Unpack(e.to_string()))?;
+            self.registry
+                .pull_blob(&reference, layer, file)
+                .await
+                .map_err(|e| ImageError::Registry(format!("layer {}: {e}", layer.digest)))?;
+            layers.push(layer_path);
+        }
+        let wanted = path.to_owned();
+        let content = tokio::task::spawn_blocking(move || extract_from_layers(&layers, &wanted))
+            .await
+            .map_err(|e| ImageError::Unpack(e.to_string()))?
+            .map_err(ImageError::Unpack)?;
+
+        if let Some(parent) = cache.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&cache, &content);
+        Ok(ExtractedFile {
+            manifest_digest: digest,
+            content,
+        })
+    }
+}
+
+/// A file read out of an OCI image.
+#[derive(Debug, Clone)]
+pub struct ExtractedFile {
+    pub manifest_digest: String,
+    pub content: Vec<u8>,
+}
+
+/// Finds `path` in layers merged bottom-first. Only regular files are
+/// returned; the topmost layer that mentions the path wins, and a whiteout
+/// above it removes the file.
+pub fn extract_from_layers(layers: &[PathBuf], path: &str) -> Result<Vec<u8>, String> {
+    let wanted = normalize(Path::new(path)).ok_or_else(|| format!("bad path {path}"))?;
+    let (parent, name) = split_parent(&wanted);
+    let whiteout = join(parent, &format!(".wh.{name}"));
+    for layer in layers.iter().rev() {
+        let mut archive = open_layer(layer)?;
+        let mut found = None;
+        for entry in archive.entries().map_err(|e| e.to_string())? {
+            let mut entry = entry.map_err(|e| e.to_string())?;
+            let Some(entry_path) = normalize(&entry.path().map_err(|e| e.to_string())?) else {
+                continue;
+            };
+            if entry_path == whiteout {
+                return Err(format!("{path} is removed by an image layer"));
+            }
+            if entry_path == wanted {
+                if !entry.header().entry_type().is_file() {
+                    return Err(format!("{path} in the image is not a regular file"));
+                }
+                let mut content = Vec::new();
+                entry.read_to_end(&mut content).map_err(|e| e.to_string())?;
+                found = Some(content);
+            }
+        }
+        if let Some(content) = found {
+            return Ok(content);
+        }
+    }
+    Err(format!("{path} not found in the image"))
+}
+
 /// LXD alias for an image with this manifest digest (`sha256:<hex>`).
 pub fn alias_for_digest(digest: &str) -> String {
     let hex = digest.split_once(':').map_or(digest, |(_, hex)| hex);
@@ -512,6 +619,34 @@ mod tests {
         ] {
             assert!(files.contains_key(dir), "{dir} missing");
         }
+    }
+
+    #[test]
+    fn extracts_files_from_the_topmost_layer() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = layer(
+            dir.path(),
+            "base",
+            &[
+                Item::File("openshell-sandbox", "v1"),
+                Item::File("other", "x"),
+            ],
+            true,
+        );
+        let upper = layer(
+            dir.path(),
+            "upper",
+            &[Item::File("openshell-sandbox", "v2")],
+            false,
+        );
+        let removed = layer(dir.path(), "removed", &[Item::File(".wh.other", "")], false);
+        let layers = [base, upper, removed];
+        assert_eq!(
+            extract_from_layers(&layers, "/openshell-sandbox").unwrap(),
+            b"v2"
+        );
+        assert!(extract_from_layers(&layers, "/other").is_err());
+        assert!(extract_from_layers(&layers, "/missing").is_err());
     }
 
     #[test]

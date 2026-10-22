@@ -17,7 +17,10 @@ description: |
     sudo snap start --enable openshell-desktop.lxd-driver
 
   and point an OpenShell gateway at its socket,
-  /var/snap/openshell-desktop/common/lxd-driver.sock.
+  /var/snap/openshell-desktop/common/lxd-driver.sock. Tell the driver where
+  the gateway's gRPC endpoint is (sandbox supervisors dial it):
+
+    sudo snap set openshell-desktop grpc-endpoint=https://127.0.0.1:17670
 adopt-info: openshell-desktop
 license: Apache-2.0
 base: core24
@@ -51,7 +54,7 @@ apps:
       - dbus-openshell-desktop
 
   lxd-driver:
-    command: bin/openshell-driver-lxd --socket $SNAP_COMMON/lxd-driver.sock --staging-dir $SNAP_COMMON/staging
+    command: bin/lxd-driver-wrapper
     daemon: simple
     install-mode: disable
     restart-condition: on-failure
@@ -113,6 +116,7 @@ parts:
       cargo build --release --locked --workspace --bins
       install -Dm755 target/release/openshell-desktop "$CRAFT_PART_INSTALL/bin/openshell-desktop"
       install -Dm755 target/release/openshell-driver-lxd "$CRAFT_PART_INSTALL/bin/openshell-driver-lxd"
+      install -Dm755 snap/local/lxd-driver-wrapper "$CRAFT_PART_INSTALL/bin/lxd-driver-wrapper"
       install -Dm644 data/io.github.kenvandine.OpenShellDesktop.desktop \
         "$CRAFT_PART_INSTALL/usr/share/applications/io.github.kenvandine.OpenShellDesktop.desktop"
       install -Dm644 data/icons/io.github.kenvandine.OpenShellDesktop.svg \
