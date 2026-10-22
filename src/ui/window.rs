@@ -148,7 +148,7 @@ impl Window {
         let imp = self.imp();
         match event {
             Event::Sandboxes(snapshots) => {
-                imp.connected.set(true);
+                let was_connected = imp.connected.replace(true);
                 imp.gateway_error.borrow_mut().clear();
                 let lxd_view = lxd_sandboxes();
                 let new: Vec<Sandbox> = snapshots
@@ -160,6 +160,10 @@ impl Window {
                     .collect();
                 self.notify_new_prompts(&new);
                 self.replace_sandboxes(new);
+                // An unchanged empty list leaves the "not running" page up.
+                if !was_connected && imp.sandboxes.borrow().is_empty() {
+                    self.refresh_detail();
+                }
             }
             Event::Unavailable(reason) => {
                 let was_connected = imp.connected.replace(false);
