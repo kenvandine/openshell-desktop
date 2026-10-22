@@ -171,7 +171,11 @@ Any failure removes both instances and the volume.
 
 - **Init**: `raw.lxc` sets `lxc.init.cmd`, `lxc.init.uid`/`gid`/`groups`,
   `lxc.init.cwd`, `lxc.no_new_privs = 1` and `lxc.cap.keep = none` (an empty
-  bounding set, which the runtime checks). Unprivileged, nesting off.
+  bounding set, which the runtime checks). Unprivileged, nesting off. The
+  workload also gets `lxc.net.0.type = empty` with `flags = up` (loopback up,
+  no NIC; the runtime's socket mediation needs loopback) and
+  `lxc.sysctl.net.ipv4.ip_unprivileged_port_start = 0` for its DNS relay on
+  127.0.0.53:53.
 - **Environment**: OpenShell's supervisor variables go on the supervisor
   (`OPENSHELL_SANDBOX_ID`, `OPENSHELL_ENDPOINT`, the main-process spec, the
   user environment as JSON, …). The agent's environment (image `ENV`, template,

@@ -596,7 +596,18 @@ async fn provisions_a_workload_and_supervisor_pair() {
         "{raw}"
     );
     assert!(raw.contains("lxc.init.uid = 1000") && raw.contains("lxc.no_new_privs = 1"));
-    assert!(!raw.contains("lxc.net"), "{raw}");
+    // Loopback only: an empty network entry brought up, and no NIC device.
+    assert!(
+        raw.contains("lxc.net.0.type = empty") && raw.contains("lxc.net.0.flags = up"),
+        "{raw}"
+    );
+    assert!(
+        !workload_body["devices"]
+            .as_object()
+            .unwrap()
+            .values()
+            .any(|d| d["type"] == "nic")
+    );
     assert!(raw.contains("lxc.sysctl.net.ipv4.ip_unprivileged_port_start = 0"));
     assert!(
         !workload
