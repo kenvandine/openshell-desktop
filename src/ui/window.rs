@@ -163,13 +163,16 @@ impl Window {
             }
             Event::Unavailable(reason) => {
                 let was_connected = imp.connected.replace(false);
+                let changed = *imp.gateway_error.borrow() != reason;
                 imp.gateway_error.replace(reason);
                 if was_connected {
                     // Fall back to what LXD shows, without gateway data.
                     imp.sandboxes.replace(Vec::new());
                     self.replace_sandboxes(lxd_sandboxes());
-                } else if imp.sandboxes.borrow().is_empty() {
+                } else if changed && imp.sandboxes.borrow().is_empty() {
                     // The empty page explains why; keep its reason current.
+                    // Rebuilding it on every poll would destroy its focused
+                    // Copy button under GTK, which crashes.
                     self.refresh_detail();
                 }
             }
