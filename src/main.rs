@@ -1,3 +1,4 @@
+mod gateway;
 mod model;
 mod terminal;
 mod ui;

@@ -7,6 +7,7 @@ use gtk::{gio, glib};
 use super::console;
 use super::detail::{self, SandboxAction};
 use super::sidebar;
+use crate::gateway::{self, Command, Event};
 use crate::model::{NetworkRule, Sandbox, SandboxState, sample_sandboxes};
 use openshell_lxd::{self as lxd, LxdStatus};
 
@@ -31,6 +32,12 @@ mod imp {
         pub selected: Cell<usize>,
         /// Whether the sandboxes are live LXD instances rather than samples.
         pub live: Cell<bool>,
+        /// Commands for the gateway thread, once it has been started.
+        pub commands: RefCell<Option<async_channel::Sender<Command>>>,
+        /// Whether the last gateway poll succeeded.
+        pub connected: Cell<bool>,
+        /// Why the gateway is unreachable, for the status tooltip.
+        pub gateway_error: RefCell<String>,
     }
 
     #[glib::object_subclass]
@@ -54,7 +61,8 @@ mod imp {
             let obj = self.obj();
             obj.setup_actions();
             obj.setup_sidebar();
-            obj.update_status(&lxd::Client::default().status());
+            obj.update_status();
+            obj.setup_gateway();
         }
     }
 
@@ -78,7 +86,7 @@ impl Window {
 
     fn setup_actions(&self) {
         let new_sandbox = gio::ActionEntry::builder("new-sandbox")
-            .activate(|win: &Self, _, _| win.toast("New Sandbox wizard is not wired up yet"))
+            .activate(|win: &Self, _, _| win.new_sandbox_dialog())
             .build();
         let preferences = gio::ActionEntry::builder("preferences")
             .activate(|win: &Self, _, _| win.toast("Preferences are not wired up yet"))
@@ -115,9 +123,168 @@ impl Window {
         sidebar::populate(&imp.sidebar_list, &imp.sandboxes.borrow(), 0);
     }
 
-    fn update_status(&self, status: &LxdStatus) {
-        let label = &self.imp().status_label;
-        let lxd = match status {
+    fn setup_gateway(&self) {
+        let handle = gateway::spawn();
+        self.imp().commands.replace(Some(handle.commands));
+        let events = handle.events;
+        glib::spawn_future_local(glib::clone!(
+            #[weak(rename_to = win)]
+            self,
+            async move {
+                while let Ok(event) = events.recv().await {
+                    win.on_gateway_event(event);
+                }
+            }
+        ));
+    }
+
+    fn send(&self, command: Command) {
+        if let Some(commands) = self.imp().commands.borrow().as_ref() {
+            let _ = commands.try_send(command);
+        }
+    }
+
+    fn on_gateway_event(&self, event: Event) {
+        let imp = self.imp();
+        match event {
+            Event::Sandboxes(infos) => {
+                imp.connected.set(true);
+                imp.gateway_error.borrow_mut().clear();
+                let lxd_view: Vec<Sandbox> = lxd::Client::default()
+                    .instances()
+                    .map(|instances| {
+                        lxd::list_sandboxes(&instances)
+                            .iter()
+                            .map(Sandbox::from_listed)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let new: Vec<Sandbox> = infos
+                    .iter()
+                    .map(|info| {
+                        let lxd = lxd_view.iter().find(|s| s.name == info.name);
+                        Sandbox::from_gateway(info, lxd)
+                    })
+                    .collect();
+                imp.live.set(true);
+                self.replace_sandboxes(new);
+            }
+            Event::Unavailable(reason) => {
+                imp.connected.set(false);
+                imp.gateway_error.replace(reason);
+            }
+            Event::Done(message) => self.toast(&message),
+            Event::Failed(message) => self.toast(&message),
+        }
+        self.update_status();
+    }
+
+    /// Swaps in a new sandbox list, keeping the selection on the same sandbox
+    /// and leaving the UI alone when nothing visible changed.
+    fn replace_sandboxes(&self, new: Vec<Sandbox>) {
+        let imp = self.imp();
+        let key = |list: &[Sandbox]| {
+            list.iter()
+                .map(|s| (s.name.clone(), s.state, s.phase.clone(), s.memory_used_mb))
+                .collect::<Vec<_>>()
+        };
+        if key(&imp.sandboxes.borrow()) == key(&new) {
+            return;
+        }
+        let selected_name = imp
+            .sandboxes
+            .borrow()
+            .get(imp.selected.get())
+            .map(|s| s.name.clone());
+        let selected = selected_name
+            .and_then(|name| new.iter().position(|s| s.name == name))
+            .unwrap_or(0);
+        imp.sandboxes.replace(new);
+        imp.selected.set(selected);
+        sidebar::populate(&imp.sidebar_list, &imp.sandboxes.borrow(), selected);
+        if imp.sandboxes.borrow().is_empty() {
+            self.refresh_detail();
+        }
+    }
+
+    fn new_sandbox_dialog(&self) {
+        if !self.imp().connected.get() {
+            self.toast("The OpenShell gateway is not running");
+            return;
+        }
+        let name = adw::EntryRow::builder().title("Name").build();
+        let image = adw::EntryRow::builder()
+            .title("Image (blank for the gateway default)")
+            .build();
+        let fields = gtk::ListBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .css_classes(["boxed-list"])
+            .build();
+        fields.append(&name);
+        fields.append(&image);
+
+        let dialog = adw::AlertDialog::new(Some("New Sandbox"), None);
+        dialog.add_responses(&[("cancel", "Cancel"), ("create", "Create")]);
+        dialog.set_response_appearance("create", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("create"));
+        dialog.set_extra_child(Some(&fields));
+        dialog.choose(
+            Some(self),
+            gio::Cancellable::NONE,
+            glib::clone!(
+                #[weak(rename_to = win)]
+                self,
+                move |response| {
+                    let name = name.text().trim().to_owned();
+                    if response == "create" && !name.is_empty() {
+                        win.send(Command::Create {
+                            name,
+                            image: image.text().trim().to_owned(),
+                        });
+                    }
+                }
+            ),
+        );
+    }
+
+    fn confirm_delete(&self, name: String) {
+        let dialog = adw::AlertDialog::new(
+            Some(&format!("Terminate {name}?")),
+            Some("The sandbox and its data are removed. This cannot be undone."),
+        );
+        dialog.add_responses(&[("cancel", "Cancel"), ("delete", "Terminate & Purge")]);
+        dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+        dialog.choose(
+            Some(self),
+            gio::Cancellable::NONE,
+            glib::clone!(
+                #[weak(rename_to = win)]
+                self,
+                move |response| {
+                    if response == "delete" {
+                        win.send(Command::Delete(name));
+                    }
+                }
+            ),
+        );
+    }
+
+    fn update_status(&self) {
+        let status = lxd::Client::default().status();
+        let imp = self.imp();
+        let gateway = if imp.connected.get() {
+            "OpenShell gateway: connected".to_owned()
+        } else {
+            let error = imp.gateway_error.borrow();
+            if error.is_empty() {
+                "OpenShell gateway: connecting".to_owned()
+            } else {
+                format!("OpenShell gateway: {error}")
+            }
+        };
+        let label = &imp.status_label;
+        let lxd = match &status {
             LxdStatus::Active { server_version } => {
                 label.set_label("Local LXD: Active ●");
                 format!(
@@ -130,14 +297,14 @@ impl Window {
                 format!("LXD unreachable: {reason}")
             }
         };
-        let source = if self.imp().live.get() {
+        let source = if self.imp().connected.get() {
+            "Sandbox list comes from the gateway"
+        } else if self.imp().live.get() {
             "Sandbox list shows LXD instances"
         } else {
             "Sandbox list shows sample data"
         };
-        label.set_tooltip_text(Some(&format!(
-            "{lxd}\nOpenShell gateway: not connected yet\n{source}"
-        )));
+        label.set_tooltip_text(Some(&format!("{lxd}\n{gateway}\n{source}")));
         let (add, remove) = if status.is_active() {
             ("active", "inactive")
         } else {
@@ -159,6 +326,16 @@ impl Window {
     fn refresh_detail(&self) {
         let imp = self.imp();
         let sandboxes = imp.sandboxes.borrow();
+        if sandboxes.is_empty() {
+            imp.content_page.set_title("OpenShell");
+            let page = adw::StatusPage::builder()
+                .icon_name("utilities-terminal-symbolic")
+                .title("No Sandboxes")
+                .description("Create one with the New Sandbox button.")
+                .build();
+            imp.detail.set_child(Some(&page));
+            return;
+        }
         let sandbox = &sandboxes[imp.selected.get()];
         imp.content_page.set_title(&sandbox.name);
         imp.detail.set_child(Some(&detail::build(sandbox, self)));
@@ -172,6 +349,31 @@ impl Window {
         let imp = self.imp();
         let selected = imp.selected.get();
         let mut message = None;
+        if imp.sandboxes.borrow().is_empty() {
+            return;
+        }
+        if imp.connected.get() {
+            let sandbox = imp.sandboxes.borrow()[selected].clone();
+            match action {
+                SandboxAction::ToggleRunning => match sandbox.state {
+                    SandboxState::Running => self.send(Command::Stop(sandbox.name)),
+                    SandboxState::Stopped => self.send(Command::Start(sandbox.name)),
+                    SandboxState::Busy => self.toast("Wait for the current operation to finish"),
+                },
+                SandboxAction::TerminateAndPurge => self.confirm_delete(sandbox.name),
+                SandboxAction::OpenTerminal if !sandbox.instance.is_empty() => {
+                    console::open(self, &sandbox.instance)
+                }
+                SandboxAction::OpenTerminal => self.toast("No LXD instance backs this sandbox yet"),
+                SandboxAction::AllowDomain(_) | SandboxAction::IgnorePrompt(_) => {
+                    self.toast("Policy decisions arrive with the advisor wiring")
+                }
+                SandboxAction::PolicyRules => self.toast("Policy editor is not wired up yet"),
+                SandboxAction::AddMount => self.toast("Mount picker is not wired up yet"),
+                SandboxAction::AddRule => self.toast("Rule editor is not wired up yet"),
+            }
+            return;
+        }
         {
             let mut sandboxes = imp.sandboxes.borrow_mut();
             let sandbox = &mut sandboxes[selected];
@@ -179,7 +381,7 @@ impl Window {
                 SandboxAction::ToggleRunning => {
                     sandbox.state = match sandbox.state {
                         SandboxState::Running => SandboxState::Stopped,
-                        SandboxState::Stopped => SandboxState::Running,
+                        SandboxState::Stopped | SandboxState::Busy => SandboxState::Running,
                     };
                 }
                 SandboxAction::AllowDomain(i) => {

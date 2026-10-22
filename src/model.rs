@@ -3,12 +3,15 @@
 //! Sandboxes come from live LXD instances when LXD is reachable, otherwise
 //! from sample data, until the app talks to the OpenShell gateway.
 
+use openshell_gateway_client::{SandboxInfo, State};
 use openshell_lxd::{Listed, parse_memory_mb};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxState {
     Running,
     Stopped,
+    /// Provisioning, starting, stopping or failed; see `Sandbox::phase`.
+    Busy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +63,8 @@ pub struct Sandbox {
     pub runtime: String,
     pub profile: String,
     pub state: SandboxState,
+    /// The gateway's phase for this sandbox, empty for sample and LXD-only data.
+    pub phase: String,
     /// "Container" or "Virtual Machine".
     pub instance_type: String,
     pub uptime_mins: Option<u32>,
@@ -79,6 +84,7 @@ impl Sandbox {
                 format!("{} · {}", self.runtime, format_mb(self.memory_used_mb))
             }
             SandboxState::Stopped => format!("{} · Stopped", self.runtime),
+            SandboxState::Busy => format!("{} · {}", self.runtime, self.phase),
         }
     }
 }
@@ -124,6 +130,7 @@ impl Sandbox {
             } else {
                 SandboxState::Stopped
             },
+            phase: String::new(),
             instance_type: if instance.kind == "virtual-machine" {
                 "Virtual Machine"
             } else {
@@ -150,6 +157,38 @@ impl Sandbox {
             rules: vec![],
             prompts: vec![],
         }
+    }
+}
+
+impl Sandbox {
+    /// A sandbox as the gateway reports it, enriched with LXD details when the
+    /// matching instance is visible.
+    pub fn from_gateway(info: &SandboxInfo, lxd: Option<&Sandbox>) -> Self {
+        let mut sandbox = lxd.cloned().unwrap_or_else(|| Sandbox {
+            name: info.name.clone(),
+            instance: String::new(),
+            runtime: "Container".into(),
+            profile: info.image.clone(),
+            state: SandboxState::Stopped,
+            phase: String::new(),
+            instance_type: "Container".into(),
+            uptime_mins: None,
+            memory_used_mb: 0,
+            memory_limit_mb: 0,
+            cpu_limit: 0,
+            gpu_passthrough: false,
+            mounts: vec![],
+            rules: vec![],
+            prompts: vec![],
+        });
+        sandbox.name = info.name.clone();
+        sandbox.state = match info.state {
+            State::Running => SandboxState::Running,
+            State::Stopped => SandboxState::Stopped,
+            State::Transitioning | State::Failed => SandboxState::Busy,
+        };
+        sandbox.phase = info.phase.clone();
+        sandbox
     }
 }
 
@@ -184,6 +223,7 @@ pub fn sample_sandboxes() -> Vec<Sandbox> {
             runtime: "Python".into(),
             profile: "Code Assistant".into(),
             state: SandboxState::Running,
+            phase: String::new(),
             instance_type: "Container".into(),
             uptime_mins: Some(24),
             memory_used_mb: 840,
@@ -213,6 +253,7 @@ pub fn sample_sandboxes() -> Vec<Sandbox> {
             runtime: "Node".into(),
             profile: "Web Researcher".into(),
             state: SandboxState::Stopped,
+            phase: String::new(),
             instance_type: "Container".into(),
             uptime_mins: None,
             memory_used_mb: 0,
@@ -229,6 +270,7 @@ pub fn sample_sandboxes() -> Vec<Sandbox> {
             runtime: "Rust".into(),
             profile: "Fully Offline".into(),
             state: SandboxState::Running,
+            phase: String::new(),
             instance_type: "Container".into(),
             uptime_mins: Some(132),
             memory_used_mb: 512,

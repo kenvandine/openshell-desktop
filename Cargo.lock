@@ -2698,9 +2698,11 @@ dependencies = [
  "bindgen",
  "gtk4",
  "libadwaita",
+ "openshell-gateway-client",
  "openshell-lxd",
  "pangocairo",
  "pkg-config",
+ "tokio",
 ]
 
 [[package]]
@@ -2745,6 +2747,15 @@ dependencies = [
  "tokio",
  "tonic",
  "tower",
+]
+
+[[package]]
+name = "openshell-gateway-client"
+version = "0.1.0"
+dependencies = [
+ "openshell-core",
+ "thiserror",
+ "tonic",
 ]
 
 [[package]]

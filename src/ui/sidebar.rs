@@ -22,6 +22,7 @@ fn row(sandbox: &Sandbox) -> adw::ActionRow {
     let (glyph, class) = match sandbox.state {
         SandboxState::Running => ("●", "running"),
         SandboxState::Stopped => ("○", "stopped"),
+        SandboxState::Busy => ("◐", "busy"),
     };
     let dot = gtk::Label::new(Some(glyph));
     dot.add_css_class("state-dot");
