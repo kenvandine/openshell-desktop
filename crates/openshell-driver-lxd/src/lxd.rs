@@ -214,6 +214,19 @@ impl Client {
         }
     }
 
+    /// The last lines a container wrote to its console, or an empty string.
+    pub async fn console_tail(&self, name: &str, lines: usize) -> String {
+        let url = self.scoped(&format!("/1.0/instances/{name}/console"));
+        match self.raw("GET", &url, empty_body(), None).await {
+            Ok((StatusCode::OK, body)) => {
+                let log = String::from_utf8_lossy(&body);
+                let kept: Vec<&str> = log.lines().filter(|l| !l.trim().is_empty()).collect();
+                kept[kept.len().saturating_sub(lines)..].join("\n")
+            }
+            _ => String::new(),
+        }
+    }
+
     pub async fn delete_instance(&self, name: &str) -> Result<()> {
         let metadata = self
             .send(

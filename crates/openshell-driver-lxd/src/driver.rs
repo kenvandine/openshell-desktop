@@ -329,6 +329,9 @@ impl LxdDriver {
             .provision(sandbox, &plan, &names, &artifacts, &launch)
             .await;
         if let Err(error) = result {
+            // A container that exited during launch says why on its console,
+            // which goes with it on cleanup.
+            let error = self.with_consoles(error, &names).await;
             warn!(sandbox_id = %sandbox.id, %error, "sandbox create failed; removing instances");
             self.remove_all(&names).await;
             return Err(error);
@@ -758,6 +761,29 @@ impl LxdDriver {
             .patch_instance_config(&names.supervisor, &config)
             .await?;
         Ok(())
+    }
+
+    /// Appends the instances' recent console output to `error`.
+    async fn with_consoles(&self, error: DriverError, names: &Names) -> DriverError {
+        let mut extra = String::new();
+        for name in [&names.workload, &names.supervisor] {
+            let console = self.lxd.console_tail(name, 15).await;
+            if !console.is_empty() {
+                extra.push_str(&format!("\n{name} console:\n{console}"));
+            }
+        }
+        if extra.is_empty() {
+            return error;
+        }
+        let append = |m: String| m + &extra;
+        match error {
+            DriverError::InvalidArgument(m) => DriverError::InvalidArgument(append(m)),
+            DriverError::Precondition(m) => DriverError::Precondition(append(m)),
+            DriverError::NotFound(m) => DriverError::NotFound(append(m)),
+            DriverError::AlreadyExists(m) => DriverError::AlreadyExists(append(m)),
+            DriverError::Unavailable(m) => DriverError::Unavailable(append(m)),
+            DriverError::Internal(m) => DriverError::Internal(append(m)),
+        }
     }
 
     /// Removes whatever exists of a sandbox; used on failed creates.
