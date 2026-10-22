@@ -110,9 +110,6 @@ fn status_group(sandbox: &Sandbox, window: &Window) -> adw::PreferencesGroup {
         "suggested-action"
     });
     buttons.append(&toggle);
-    for button in [&terminal, &rules, &toggle] {
-        button.add_css_class("pill");
-    }
     group.add(&buttons);
     group
 }
@@ -240,7 +237,6 @@ fn danger_group(window: &Window) -> adw::PreferencesGroup {
         window,
     );
     purge.add_css_class("destructive-action");
-    purge.add_css_class("pill");
     purge.set_halign(gtk::Align::Center);
     group.add(&purge);
     group
