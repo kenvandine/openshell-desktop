@@ -1,4 +1,4 @@
-//! Small forms: new sandbox, new network rule and new host folder mount.
+//! Small forms: new network rule and new host folder mount.
 //! Each asks its question in an `AdwAlertDialog` and hands the answer to a
 //! callback, which only runs when the form is confirmed and valid.
 
@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 
 use adw::prelude::*;
 use gtk::{gio, glib};
-use openshell_gateway_client::CreateOptions;
 
 /// Where mounts go by default: the sandbox workspace, which its policy
 /// already lets the agent read and write.
@@ -49,60 +48,6 @@ fn validate(
             }
         });
     }
-}
-
-pub fn new_sandbox(
-    parent: &impl IsA<gtk::Widget>,
-    gpu_supported: bool,
-    done: impl Fn(String, CreateOptions) + 'static,
-) {
-    let name = adw::EntryRow::builder().title("Name").build();
-    let image = adw::EntryRow::builder()
-        .title("Image (blank for the gateway default)")
-        .build();
-    let cpus = adw::SpinRow::with_range(0.0, 64.0, 1.0);
-    cpus.set_title("CPU limit");
-    cpus.set_subtitle("Cores; 0 for no limit");
-    let memory = adw::SpinRow::with_range(0.0, 262_144.0, 256.0);
-    memory.set_title("Memory limit");
-    memory.set_subtitle("MB; 0 for no limit");
-    let gpu = adw::SwitchRow::builder()
-        .title("GPU passthrough")
-        .subtitle(if gpu_supported {
-            "Pass the GPU configured for the LXD driver into the sandbox"
-        } else {
-            "No GPU is configured for the LXD driver"
-        })
-        .sensitive(gpu_supported)
-        .build();
-    let fields = form();
-    fields.append(&name);
-    fields.append(&image);
-    fields.append(&cpus);
-    fields.append(&memory);
-    fields.append(&gpu);
-
-    let dialog = alert("New Sandbox", None, "Create");
-    dialog.set_extra_child(Some(&fields));
-    validate(&dialog, &[&name], {
-        let name = name.clone();
-        move || !name.text().trim().is_empty()
-    });
-    dialog.choose(Some(parent), gio::Cancellable::NONE, move |response| {
-        if response != "confirm" {
-            return;
-        }
-        done(
-            name.text().trim().to_owned(),
-            CreateOptions {
-                image: image.text().trim().to_owned(),
-                cpus: cpus.value() as u32,
-                memory_mb: memory.value() as u32,
-                gpu: gpu.is_active(),
-                ..Default::default()
-            },
-        );
-    });
 }
 
 /// The rule a user asked for: `binary` is `None` for any executable.
@@ -256,7 +201,7 @@ pub fn add_mount(
 /// The folder's real path on the host. Inside the snap the file chooser
 /// portal hands out document portal paths (`/run/user/1000/doc/<id>/<name>`),
 /// which LXD cannot mount, so those are mapped back through the portal.
-fn host_path(file: &gio::File) -> Option<PathBuf> {
+pub fn host_path(file: &gio::File) -> Option<PathBuf> {
     let path = file.path()?;
     let Some((id, rest)) = document_id(&path) else {
         return Some(path);

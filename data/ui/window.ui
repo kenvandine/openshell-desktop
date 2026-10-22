@@ -44,7 +44,7 @@
                         <child type="start">
                           <object class="GtkButton">
                             <property name="icon-name">list-add-symbolic</property>
-                            <property name="tooltip-text" translatable="yes">New Sandbox</property>
+                            <property name="tooltip-text" translatable="yes">New Agent</property>
                             <property name="action-name">win.new-sandbox</property>
                           </object>
                         </child>

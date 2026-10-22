@@ -95,6 +95,29 @@ impl ExecOutputStream {
 }
 
 impl Gateway {
+    /// Runs `command` in `sandbox` without a terminal and returns its exit
+    /// status; for quick checks such as whether a binary is installed.
+    pub async fn exec_status(&mut self, sandbox: &str, command: Vec<String>) -> Result<i32, Error> {
+        let mut request = start_request(
+            sandbox,
+            ExecOptions {
+                command,
+                ..Default::default()
+            },
+        );
+        request.tty = false;
+        request.no_login_shell = true;
+        let mut events = self.client.exec_sandbox(request).await?.into_inner();
+        while let Some(event) = events.message().await? {
+            if let Some(exec_sandbox_event::Payload::Exit(exit)) = event.payload {
+                return Ok(exit.exit_code);
+            }
+        }
+        Err(Error::Rpc(tonic::Status::unavailable(
+            "the command ended without an exit status",
+        )))
+    }
+
     /// Starts `options.command` with a pseudo-terminal in `sandbox`.
     /// Dropping the output stream cancels the call, which ends the command.
     pub async fn exec_interactive(

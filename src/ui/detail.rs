@@ -9,6 +9,7 @@ use crate::model::{Access, Sandbox, SandboxState, format_mb};
 #[derive(Debug, Clone)]
 pub enum SandboxAction {
     OpenTerminal,
+    OpenAgent,
     DebugConsole,
     PolicyRules,
     ToggleRunning,
@@ -111,6 +112,16 @@ fn status_group(sandbox: &Sandbox, window: &Window) -> adw::PreferencesGroup {
     let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     buttons.set_halign(gtk::Align::Center);
     buttons.set_margin_top(12);
+    if let Some(agent) = sandbox.agent.as_deref().and_then(openshell_agents::find) {
+        let open = action_button(
+            &format!("Open {}", agent.name),
+            SandboxAction::OpenAgent,
+            window,
+        );
+        open.add_css_class("suggested-action");
+        open.set_sensitive(running && !sandbox.instance.is_empty());
+        buttons.append(&open);
+    }
     let terminal = action_button("Open Terminal", SandboxAction::OpenTerminal, window);
     terminal.set_sensitive(running);
     buttons.append(&terminal);

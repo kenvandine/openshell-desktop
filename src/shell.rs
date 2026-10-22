@@ -40,15 +40,18 @@ impl Session {
         }
     }
 
-    /// Runs `command` in `sandbox` through the gateway. A thread with its own
+    /// Runs `options.command` in `sandbox` through the gateway. A thread with its own
     /// runtime owns the call, so a slow session never holds up the sandbox
     /// list; it ends when the command exits or this session is dropped.
     pub fn gateway(
         sandbox: String,
-        command: Vec<String>,
+        mut options: ExecOptions,
         cols: u16,
         rows: u16,
     ) -> (Self, async_channel::Receiver<SessionEvent>) {
+        options.cols = cols;
+        options.rows = rows;
+        options.environment.push(("TERM".into(), TERM.into()));
         let (events, events_rx) = async_channel::unbounded();
         // The UI writes before the call is up; buffer that input here and
         // hand it over once the gateway's input handle exists.
@@ -60,13 +63,6 @@ impl Session {
                     .enable_all()
                     .build()
                     .expect("tokio runtime");
-                let options = ExecOptions {
-                    command,
-                    environment: vec![("TERM".into(), TERM.into())],
-                    cols,
-                    rows,
-                    ..Default::default()
-                };
                 let result = runtime.block_on(run(&sandbox, options, &mut input_rx, &events));
                 let event = match result {
                     Ok(code) => SessionEvent::Ended(code),

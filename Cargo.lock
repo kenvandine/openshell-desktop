@@ -2738,6 +2738,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
+name = "openshell-agents"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "flate2",
+ "reqwest",
+ "serde",
+ "sha2 0.10.9",
+ "tar",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "openshell-core"
 version = "0.0.0"
 source = "git+https://github.com/NVIDIA/OpenShell?rev=39d95b42cb403d883e2f545a3861131ccd3d2ebf#39d95b42cb403d883e2f545a3861131ccd3d2ebf"
@@ -2803,6 +2818,7 @@ dependencies = [
  "gtk4",
  "ksni",
  "libadwaita",
+ "openshell-agents",
  "openshell-gateway-client",
  "openshell-lxd",
  "pangocairo",
