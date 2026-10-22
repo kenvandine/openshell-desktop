@@ -33,6 +33,19 @@ export LD_LIBRARY_PATH=$PWD/vendor/ghostty-vt/lib
 cargo run
 ```
 
+## Snap
+
+`snap/snapcraft.yaml` builds a strict `core24` snap with the app (using the
+GNOME extension) and the `openshell-driver-lxd` daemon, which is disabled by
+default. The **Snap** workflow builds it for amd64 and arm64 on every push and
+pull request and uploads the `.snap` as a build artifact.
+
+```sh
+snapcraft                                # or: snapcraft --use-lxd
+sudo snap install --dangerous openshell-desktop_*.snap
+sudo snap connect openshell-desktop:lxd lxd:lxd
+```
+
 ## Debug console
 
 **Open Terminal** starts a shell in the selected LXD instance through LXD's
