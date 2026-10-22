@@ -82,6 +82,8 @@ apps:
     plugs:
       - lxd
       - network
+      # listen() on the driver's Unix socket for the gateway.
+      - network-bind
 
 parts:
   libghostty-vt:
