@@ -70,7 +70,8 @@ parts:
       curl -fsSL "https://ziglang.org/download/$ZIG_VERSION/zig-$zig_arch-linux-$ZIG_VERSION.tar.xz" \
         | tar -xJ --strip-components=1 -C "$CRAFT_PART_BUILD/zig"
       export PATH="$CRAFT_PART_BUILD/zig:$PATH"
-      scripts/build-libghostty-vt.sh "$CRAFT_PART_INSTALL"
+      # Zig cannot resolve hosts in the build instance; fetch deps with curl.
+      ZIG_PREFETCH_WITH_CURL=1 scripts/build-libghostty-vt.sh "$CRAFT_PART_INSTALL"
     # Headers and the .pc file are only needed to build the app.
     prime:
       - lib/libghostty-vt*.so*
