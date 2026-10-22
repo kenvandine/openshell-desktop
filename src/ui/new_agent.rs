@@ -175,10 +175,9 @@ fn sign_in(
 
     let group = adw::PreferencesGroup::builder()
         .description(format!(
-            "{} needs a {} key. The OpenShell gateway stores it and adds it only to \
-             {}'s requests to {}; the agent itself never sees it.",
+            "{} signs in with an API key. The OpenShell gateway stores it and adds it \
+             only to {}'s requests to {}; the agent itself never sees it.",
             agent.name,
-            profile.display_name,
             agent.name,
             profile.hosts.join(", ")
         ))

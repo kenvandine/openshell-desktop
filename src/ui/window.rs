@@ -773,10 +773,21 @@ impl Window {
         if sandboxes.is_empty() {
             imp.content_page.set_title("OpenShell");
             let page = if imp.connected.get() {
+                let start = gtk::Button::builder()
+                    .label("New Agent…")
+                    .action_name("win.new-sandbox")
+                    .halign(gtk::Align::Center)
+                    .css_classes(["pill", "suggested-action"])
+                    .build();
                 adw::StatusPage::builder()
                     .icon_name("utilities-terminal-symbolic")
-                    .title("No Sandboxes")
-                    .description("Create one with the New Sandbox button.")
+                    .title("Run Your First Agent")
+                    .description(
+                        "Pick a coding agent and a project folder. OpenShell runs it in \
+                         a sandbox that only sees that folder, and asks you before it \
+                         reaches anything new on the network.",
+                    )
+                    .child(&start)
                     .build()
             } else {
                 self.gateway_not_running_page()

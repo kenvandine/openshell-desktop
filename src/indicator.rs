@@ -151,7 +151,7 @@ impl ksni::Tray for Tray {
         }
         menu.push(MenuItem::Separator);
         if summary.connected {
-            menu.push(self.item("New Sandbox…", Action::NewSandbox));
+            menu.push(self.item("New Agent…", Action::NewSandbox));
         }
         menu.push(self.item("Show OpenShell Desktop", Action::Show));
         menu.push(self.item("Quit", Action::Quit));
