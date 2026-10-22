@@ -5,8 +5,12 @@ agent sandboxes, running on local LXD or a MicroCloud cluster.
 
 ![Main window](docs/screenshot.png)
 
-> **Status:** early prototype. The UI is a skeleton backed by sample data; the
-> only live integration is an LXD health probe on the snap socket.
+> **Status:** early prototype. With the bundled gateway and LXD driver running
+> (see [Running](#running)) the app lists, creates, starts, stops and deletes
+> sandboxes through the OpenShell gateway, shows each sandbox's network policy,
+> and lets you approve or reject the policy advisor's proposals, with a desktop
+> notification when a sandbox is blocked. Without the gateway it falls back to
+> LXD instances or sample data. Not yet verified on real hardware.
 
 - [Product & technical spec](docs/SPEC.md)
 - [Compute driver research](docs/compute-driver-research.md): why we need an
@@ -55,6 +59,21 @@ GTK widget drawing libghostty-vt's render state with Pango. The shell runs
 outside OpenShell's policy, and the window says so; the policy-enforced
 session will come through the OpenShell gateway.
 
+## Running
+
+The snap bundles `openshell-gateway` and the LXD driver as per-user services
+(they stay off until you enable them, since the gateway binds one loopback port):
+
+```sh
+sudo snap connect openshell-desktop:lxd lxd:lxd
+systemctl --user enable --now snap.openshell-desktop.lxd-driver.service \
+  snap.openshell-desktop.gateway.service
+```
+
+The gateway listens on `127.0.0.1:17671` (`snap set openshell-desktop
+gateway-port=…` to change it; OpenShell's own snap uses 17670). See
+[docs/lxd-driver.md](docs/lxd-driver.md#bundled-gateway-snap).
+
 ## Layout
 
 | Path | What |
@@ -65,6 +84,8 @@ session will come through the OpenShell gateway.
 | `src/ui/detail.rs` | Sandbox detail `AdwPreferencesPage` (status, Policy Advisor, mounts, network, resources) |
 | `src/ui/console.rs` | Debug console window |
 | `src/terminal/` | libghostty-vt bindings, safe wrapper and the GTK terminal widget |
-| `src/model.rs` | View-model types; live LXD instances or sample data |
+| `src/gateway.rs` | Background thread that polls the gateway and runs commands for the UI |
+| `src/model.rs` | View-model types; gateway sandboxes enriched with LXD details, or LXD/sample data |
+| `crates/openshell-gateway-client` | mTLS client for the gateway API: sandboxes, policy, advisor proposals |
 | `crates/openshell-driver-lxd` | OpenShell compute driver: gRPC on a Unix socket for the gateway, sandboxes as LXD containers, OCI → LXD image import |
 | `crates/openshell-lxd` | GTK-free LXD REST client and exec console bridge (reusable by the LXD compute driver) |
