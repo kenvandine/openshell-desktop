@@ -85,6 +85,9 @@ parts:
   libghostty-vt:
     plugin: nil
     source: .
+    # A git source makes `craftctl default` set the version itself, which then
+    # collides with the explicit set below; the version comes from Cargo.toml.
+    source-type: local
     source-type: local
     build-packages:
       - curl
