@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 
+use openshell_gateway_client::codex::CodexTokens;
 use openshell_gateway_client::{
     Config, CreateOptions, Error, Gateway, ProfileInfo, Proposal, ProviderInfo, Snapshot,
 };
@@ -71,6 +72,11 @@ pub enum Command {
         kind: String,
         credentials: Credentials,
     },
+    /// Store a Codex sign-in as provider `name`, renewed by the gateway.
+    CreateCodexProvider {
+        name: String,
+        tokens: CodexTokens,
+    },
     DeleteProvider(String),
 }
 
@@ -94,6 +100,9 @@ impl Command {
                 format!("Changing how {sandbox} asks for approval")
             }
             Command::CreateProvider { name, .. } => format!("Adding account {name}"),
+            Command::CreateCodexProvider { name, .. } => {
+                format!("Adding Codex account {name}")
+            }
             Command::DeleteProvider(name) => format!("Removing account {name}"),
         })
     }
@@ -367,6 +376,11 @@ async fn execute(gateway: &mut Gateway, command: Command) -> Result<Outcome, Err
             gateway.create_provider(&name, &kind, credentials.0).await?;
             accounts_changed = true;
             Some(format!("Added account {name}"))
+        }
+        Command::CreateCodexProvider { name, tokens } => {
+            gateway.create_codex_provider(&name, &tokens).await?;
+            accounts_changed = true;
+            Some(format!("Added Codex account {name}"))
         }
         Command::DeleteProvider(name) => {
             gateway.delete_provider(&name).await?;

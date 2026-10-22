@@ -56,6 +56,23 @@ impl Arch {
             Arch::Arm64 => "arm64",
         }
     }
+
+    fn triple(self) -> &'static str {
+        match self {
+            Arch::X64 => "x86_64-unknown-linux-musl",
+            Arch::Arm64 => "aarch64-unknown-linux-musl",
+        }
+    }
+}
+
+/// How the agent's terminal starts it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Launch {
+    /// Run the binary as is.
+    Direct,
+    /// Write the `~/.codex/auth.json` Codex reads its sign-in from, made of
+    /// the provider's handles, then run the binary.
+    CodexSignIn,
 }
 
 /// An agent the New Agent dialog offers.
@@ -70,20 +87,76 @@ pub struct Agent {
     pub profiles: &'static [&'static str],
     /// Environment for the agent's terminal.
     pub environment: &'static [(&'static str, &'static str)],
+    pub launch: Launch,
     /// The npm package with the native build; `{arch}` is `x64` or `arm64`.
     package: &'static str,
-    /// The binary's path inside that package's archive.
+    /// The version or dist-tag of that package to fetch, with `{arch}` too.
+    tag: &'static str,
+    /// The binary's path inside that package's archive; `{triple}` is the
+    /// Rust target, such as `x86_64-unknown-linux-musl`.
     entry: &'static str,
 }
 
 impl Agent {
     pub fn command(&self) -> Vec<String> {
-        vec![self.install_path.to_owned()]
+        match self.launch {
+            Launch::Direct => vec![self.install_path.to_owned()],
+            Launch::CodexSignIn => vec![
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                codex_sign_in_script(self.install_path, unix_now()),
+            ],
+        }
     }
 
     fn package(&self, arch: Arch) -> String {
         self.package.replace("{arch}", arch.npm())
     }
+
+    fn tag(&self, arch: Arch) -> String {
+        self.tag.replace("{arch}", arch.npm())
+    }
+
+    fn entry(&self, arch: Arch) -> String {
+        self.entry.replace("{triple}", arch.triple())
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// A shell script that writes Codex's sign-in file and runs `binary`.
+///
+/// The file holds the handles the gateway put in the environment, not real
+/// tokens; the proxy swaps them on requests to OpenAI. `chatgptAuthTokens`
+/// tells Codex the tokens are managed elsewhere, so it never tries to renew
+/// them itself (the gateway does). Codex also wants an ID token to read the
+/// account from, which is never sent anywhere, so it gets an unsigned
+/// stand-in, as in OpenShell's own Codex example. Without an account in the
+/// environment the file is left alone and Codex asks the user to sign in.
+fn codex_sign_in_script(binary: &str, now: u64) -> String {
+    let b64 = |json: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json);
+    let id_token = format!(
+        "{}.{}.placeholder",
+        b64(r#"{"alg":"none","typ":"JWT"}"#),
+        b64(&format!(
+            r#"{{"iss":"https://auth.openai.com","aud":"codex","sub":"openshell-desktop","email":"codex@openshell.local","iat":{now},"exp":{}}}"#,
+            now + 365 * 24 * 3600
+        )),
+    );
+    format!(
+        r#"if [ -n "$CODEX_AUTH_ACCESS_TOKEN" ]; then
+  mkdir -p "$HOME/.codex"
+  umask 077
+  cat > "$HOME/.codex/auth.json" <<EOF
+{{"auth_mode":"chatgptAuthTokens","OPENAI_API_KEY":null,"tokens":{{"id_token":"{id_token}","access_token":"$CODEX_AUTH_ACCESS_TOKEN","refresh_token":"","account_id":"$CODEX_AUTH_ACCOUNT_ID"}},"last_refresh":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}}
+EOF
+fi
+exec {binary}"#
+    )
 }
 
 pub const CATALOG: &[Agent] = &[
@@ -96,8 +169,24 @@ pub const CATALOG: &[Agent] = &[
         // The sandbox's /usr is read-only, so it cannot update itself; the
         // app installs new versions instead.
         environment: &[("DISABLE_AUTOUPDATER", "1")],
+        launch: Launch::Direct,
         package: "@anthropic-ai/claude-code-linux-{arch}",
+        tag: "latest",
         entry: "package/claude",
+    },
+    Agent {
+        id: "codex",
+        name: "Codex",
+        description: "OpenAI's coding agent, with your ChatGPT account",
+        install_path: "/usr/local/bin/codex",
+        profiles: &["codex"],
+        environment: &[],
+        launch: Launch::CodexSignIn,
+        // The main package is a Node launcher; each native build is the same
+        // package published under a per-platform version and dist-tag.
+        package: "@openai/codex",
+        tag: "linux-{arch}",
+        entry: "package/vendor/{triple}/bin/codex",
     },
     Agent {
         id: "opencode",
@@ -106,7 +195,9 @@ pub const CATALOG: &[Agent] = &[
         install_path: "/usr/local/bin/opencode",
         profiles: &["openrouter"],
         environment: &[],
+        launch: Launch::Direct,
         package: "opencode-linux-{arch}",
+        tag: "latest",
         entry: "package/bin/opencode",
     },
 ];
@@ -148,7 +239,11 @@ pub async fn fetch(
         .user_agent(concat!("openshell-desktop/", env!("CARGO_PKG_VERSION")))
         .build()?;
     let manifest: Manifest = client
-        .get(format!("{REGISTRY}/{}/latest", package.replace('/', "%2f")))
+        .get(format!(
+            "{REGISTRY}/{}/{}",
+            package.replace('/', "%2f"),
+            agent.tag(arch)
+        ))
         .send()
         .await?
         .error_for_status()?
@@ -188,7 +283,7 @@ pub async fn fetch(
     }
     drop(archive.1);
 
-    let result = extract(&archive.0, agent.entry, &dir, agent.id);
+    let result = extract(&archive.0, &agent.entry(arch), &dir, agent.id);
     let _ = std::fs::remove_file(&archive.0);
     let size = result.map_err(|e| match e {
         Error::MissingEntry { entry, .. } => Error::MissingEntry {
@@ -257,6 +352,58 @@ mod tests {
             find("opencode").unwrap().package(Arch::Arm64),
             "opencode-linux-arm64"
         );
+        let codex = find("codex").unwrap();
+        assert_eq!(codex.package(Arch::X64), "@openai/codex");
+        assert_eq!(codex.tag(Arch::Arm64), "linux-arm64");
+        assert_eq!(
+            codex.entry(Arch::X64),
+            "package/vendor/x86_64-unknown-linux-musl/bin/codex"
+        );
+    }
+
+    #[test]
+    fn codex_gets_a_sign_in_file_made_of_handles() {
+        let home = tempfile::tempdir().unwrap();
+        let script = codex_sign_in_script("/bin/true", 1_700_000_000);
+        let status = std::process::Command::new("/bin/sh")
+            .args(["-c", &script])
+            .env("HOME", home.path())
+            .env("CODEX_AUTH_ACCESS_TOKEN", "openshell:handle:access")
+            .env("CODEX_AUTH_ACCOUNT_ID", "openshell:handle:account")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let auth: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(home.path().join(".codex/auth.json")).unwrap())
+                .unwrap();
+        assert_eq!(auth["auth_mode"], "chatgptAuthTokens");
+        assert_eq!(auth["tokens"]["access_token"], "openshell:handle:access");
+        assert_eq!(auth["tokens"]["account_id"], "openshell:handle:account");
+        assert_eq!(auth["tokens"]["refresh_token"], "");
+        let claims = auth["tokens"]["id_token"]
+            .as_str()
+            .unwrap()
+            .split('.')
+            .nth(1)
+            .unwrap()
+            .to_owned();
+        let claims: serde_json::Value = serde_json::from_slice(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(claims)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(claims["iat"], 1_700_000_000);
+
+        // Without an account, Codex is left to sign in by itself.
+        let bare = tempfile::tempdir().unwrap();
+        std::process::Command::new("/bin/sh")
+            .args(["-c", &script])
+            .env("HOME", bare.path())
+            .env_remove("CODEX_AUTH_ACCESS_TOKEN")
+            .status()
+            .unwrap();
+        assert!(!bare.path().join(".codex").exists());
     }
 
     #[test]
@@ -271,6 +418,7 @@ mod tests {
             find("opencode").unwrap().install_path,
             "/usr/local/bin/opencode"
         );
+        assert_eq!(find("codex").unwrap().install_path, "/usr/local/bin/codex");
     }
 
     #[test]
