@@ -51,6 +51,10 @@ fn install_actions(app: &adw::Application) {
     let quit = gtk::gio::ActionEntry::builder("quit")
         .activate(|app: &adw::Application, _, _| app.quit())
         .build();
-    app.add_action_entries([about, quit]);
+    // Target of desktop notifications: bring the window forward.
+    let show_window = gtk::gio::ActionEntry::builder("show-window")
+        .activate(|app: &adw::Application, _, _| app.activate())
+        .build();
+    app.add_action_entries([about, quit, show_window]);
     app.set_accels_for_action("app.quit", &["<Control>q"]);
 }

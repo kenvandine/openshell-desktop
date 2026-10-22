@@ -6,23 +6,35 @@
 
 use std::time::Duration;
 
-use openshell_gateway_client::{Config, Error, Gateway, SandboxInfo};
+use openshell_gateway_client::{Config, Error, Gateway, Proposal, Snapshot};
 
 const POLL: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone)]
 pub enum Command {
     Refresh,
-    Create { name: String, image: String },
+    Create {
+        name: String,
+        image: String,
+    },
     Start(String),
     Stop(String),
     Delete(String),
+    /// Allow the endpoint a blocked request needs.
+    Approve {
+        sandbox: String,
+        proposal: Proposal,
+    },
+    Reject {
+        sandbox: String,
+        chunk_id: String,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub enum Event {
     /// Current sandboxes; the gateway is reachable.
-    Sandboxes(Vec<SandboxInfo>),
+    Sandboxes(Vec<Snapshot>),
     /// The gateway cannot be reached; the reason is shown in the status tooltip.
     Unavailable(String),
     /// A command succeeded.
@@ -91,7 +103,7 @@ async fn run(commands: async_channel::Receiver<Command>, events: async_channel::
                     sent.push(Event::Done(message));
                 }
                 // A command changes what the list shows, so follow it with one.
-                match client.list().await {
+                match client.snapshot().await {
                     Ok(list) => sent.push(Event::Sandboxes(list)),
                     Err(error) => sent.push(failure(&mut gateway, error)),
                 }
@@ -152,6 +164,14 @@ async fn execute(gateway: &mut Gateway, command: Command) -> Result<Outcome, Err
         Command::Delete(name) => {
             gateway.delete(&name).await?;
             Some(format!("Deleted {name}"))
+        }
+        Command::Approve { sandbox, proposal } => {
+            gateway.approve(&sandbox, &proposal).await?;
+            Some(format!("Allowed {}:{}", proposal.host, proposal.port))
+        }
+        Command::Reject { sandbox, chunk_id } => {
+            gateway.reject(&sandbox, &chunk_id).await?;
+            None
         }
     };
     Ok(Outcome { message })

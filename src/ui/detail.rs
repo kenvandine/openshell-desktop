@@ -136,7 +136,7 @@ fn advisor_group(sandbox: &Sandbox, window: &Window) -> adw::PreferencesGroup {
     }
     for (i, prompt) in sandbox.prompts.iter().enumerate() {
         let row = adw::ActionRow::builder()
-            .title(format!("Blocked: {} {}", prompt.method, prompt.url))
+            .title(format!("Blocked: {} {}", prompt.method, prompt.url).replace("  ", " "))
             .subtitle(format!("Requested by: {}", prompt.binary))
             .build();
         row.add_prefix(&gtk::Image::from_icon_name("dialog-warning-symbolic"));

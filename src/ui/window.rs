@@ -36,6 +36,10 @@ mod imp {
         pub commands: RefCell<Option<async_channel::Sender<Command>>>,
         /// Whether the last gateway poll succeeded.
         pub connected: Cell<bool>,
+        /// Set after the first successful poll, so existing prompts don't notify.
+        pub connected_once: Cell<bool>,
+        /// Draft chunks already notified about.
+        pub seen_prompts: RefCell<std::collections::HashSet<String>>,
         /// Why the gateway is unreachable, for the status tooltip.
         pub gateway_error: RefCell<String>,
     }
@@ -147,7 +151,7 @@ impl Window {
     fn on_gateway_event(&self, event: Event) {
         let imp = self.imp();
         match event {
-            Event::Sandboxes(infos) => {
+            Event::Sandboxes(snapshots) => {
                 imp.connected.set(true);
                 imp.gateway_error.borrow_mut().clear();
                 let lxd_view: Vec<Sandbox> = lxd::Client::default()
@@ -159,13 +163,14 @@ impl Window {
                             .collect()
                     })
                     .unwrap_or_default();
-                let new: Vec<Sandbox> = infos
+                let new: Vec<Sandbox> = snapshots
                     .iter()
-                    .map(|info| {
-                        let lxd = lxd_view.iter().find(|s| s.name == info.name);
-                        Sandbox::from_gateway(info, lxd)
+                    .map(|snapshot| {
+                        let lxd = lxd_view.iter().find(|s| s.name == snapshot.info.name);
+                        Sandbox::from_gateway(snapshot, lxd)
                     })
                     .collect();
+                self.notify_new_prompts(&new);
                 imp.live.set(true);
                 self.replace_sandboxes(new);
             }
@@ -185,7 +190,17 @@ impl Window {
         let imp = self.imp();
         let key = |list: &[Sandbox]| {
             list.iter()
-                .map(|s| (s.name.clone(), s.state, s.phase.clone(), s.memory_used_mb))
+                .map(|s| {
+                    let chunks: Vec<_> = s.prompts.iter().map(|p| p.chunk_id.clone()).collect();
+                    (
+                        s.name.clone(),
+                        s.state,
+                        s.phase.clone(),
+                        s.memory_used_mb,
+                        s.rules.len(),
+                        chunks,
+                    )
+                })
                 .collect::<Vec<_>>()
         };
         if key(&imp.sandboxes.borrow()) == key(&new) {
@@ -204,6 +219,38 @@ impl Window {
         sidebar::populate(&imp.sidebar_list, &imp.sandboxes.borrow(), selected);
         if imp.sandboxes.borrow().is_empty() {
             self.refresh_detail();
+        }
+    }
+
+    /// Raises a desktop notification for each blocked request not seen before.
+    /// The first poll only records what is already pending.
+    fn notify_new_prompts(&self, sandboxes: &[Sandbox]) {
+        let imp = self.imp();
+        let first_poll = !imp.connected_once.replace(true);
+        let mut seen = imp.seen_prompts.borrow_mut();
+        for sandbox in sandboxes {
+            for prompt in &sandbox.prompts {
+                if !seen.insert(prompt.chunk_id.clone()) || first_poll {
+                    continue;
+                }
+                let Some(app) = self.application() else {
+                    continue;
+                };
+                let notification =
+                    gio::Notification::new(&format!("{} blocked a request", sandbox.name));
+                notification.set_body(Some(&format!(
+                    "{} tried to reach {}:{}",
+                    if prompt.binary.is_empty() {
+                        "A process"
+                    } else {
+                        &prompt.binary
+                    },
+                    prompt.host,
+                    prompt.port
+                )));
+                notification.set_default_action("app.show-window");
+                app.send_notification(Some(&format!("blocked-{}", prompt.chunk_id)), &notification);
+            }
         }
     }
 
@@ -365,8 +412,21 @@ impl Window {
                     console::open(self, &sandbox.instance)
                 }
                 SandboxAction::OpenTerminal => self.toast("No LXD instance backs this sandbox yet"),
-                SandboxAction::AllowDomain(_) | SandboxAction::IgnorePrompt(_) => {
-                    self.toast("Policy decisions arrive with the advisor wiring")
+                SandboxAction::AllowDomain(i) => {
+                    if let Some(prompt) = sandbox.prompts.get(i) {
+                        self.send(Command::Approve {
+                            sandbox: sandbox.name.clone(),
+                            proposal: prompt.to_proposal(),
+                        });
+                    }
+                }
+                SandboxAction::IgnorePrompt(i) => {
+                    if let Some(prompt) = sandbox.prompts.get(i) {
+                        self.send(Command::Reject {
+                            sandbox: sandbox.name.clone(),
+                            chunk_id: prompt.chunk_id.clone(),
+                        });
+                    }
                 }
                 SandboxAction::PolicyRules => self.toast("Policy editor is not wired up yet"),
                 SandboxAction::AddMount => self.toast("Mount picker is not wired up yet"),

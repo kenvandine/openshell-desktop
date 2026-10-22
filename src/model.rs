@@ -3,7 +3,7 @@
 //! Sandboxes come from live LXD instances when LXD is reachable, otherwise
 //! from sample data, until the app talks to the OpenShell gateway.
 
-use openshell_gateway_client::{SandboxInfo, State};
+use openshell_gateway_client::{Proposal, Snapshot, State};
 use openshell_lxd::{Listed, parse_memory_mb};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +52,22 @@ pub struct AdvisorPrompt {
     pub host: String,
     pub port: u16,
     pub binary: String,
+    /// Gateway draft chunk and the token to approve it with; empty for samples.
+    pub chunk_id: String,
+    pub review_token: String,
+}
+
+impl AdvisorPrompt {
+    pub fn to_proposal(&self) -> Proposal {
+        Proposal {
+            chunk_id: self.chunk_id.clone(),
+            review_token: self.review_token.clone(),
+            host: self.host.clone(),
+            port: self.port,
+            binary: self.binary.clone(),
+            rationale: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -163,7 +179,8 @@ impl Sandbox {
 impl Sandbox {
     /// A sandbox as the gateway reports it, enriched with LXD details when the
     /// matching instance is visible.
-    pub fn from_gateway(info: &SandboxInfo, lxd: Option<&Sandbox>) -> Self {
+    pub fn from_gateway(snapshot: &Snapshot, lxd: Option<&Sandbox>) -> Self {
+        let info = &snapshot.info;
         let mut sandbox = lxd.cloned().unwrap_or_else(|| Sandbox {
             name: info.name.clone(),
             instance: String::new(),
@@ -188,6 +205,27 @@ impl Sandbox {
             State::Transitioning | State::Failed => SandboxState::Busy,
         };
         sandbox.phase = info.phase.clone();
+        sandbox.rules = snapshot
+            .allowed
+            .iter()
+            .map(|e| NetworkRule {
+                host: e.host.clone(),
+                port: e.port,
+            })
+            .collect();
+        sandbox.prompts = snapshot
+            .proposals
+            .iter()
+            .map(|p| AdvisorPrompt {
+                method: String::new(),
+                url: format!("{}:{}", p.host, p.port),
+                host: p.host.clone(),
+                port: p.port,
+                binary: p.binary.clone(),
+                chunk_id: p.chunk_id.clone(),
+                review_token: p.review_token.clone(),
+            })
+            .collect();
         sandbox
     }
 }
@@ -245,6 +283,8 @@ pub fn sample_sandboxes() -> Vec<Sandbox> {
                 host: "registry.npmjs.org".into(),
                 port: 443,
                 binary: "/usr/bin/npm".into(),
+                chunk_id: String::new(),
+                review_token: String::new(),
             }],
         },
         Sandbox {

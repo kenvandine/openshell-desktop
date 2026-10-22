@@ -10,8 +10,10 @@ use std::time::Duration;
 
 use openshell_core::proto::datamodel::v1::{WorkspaceSelector, workspace_selector::Selection};
 use openshell_core::proto::{
-    CreateSandboxRequest, DeleteSandboxRequest, ListSandboxesRequest, Sandbox, SandboxPhase,
-    SandboxSpec, StartSandboxRequest, StopSandboxRequest, open_shell_client::OpenShellClient,
+    ApproveDraftChunkRequest, CreateSandboxRequest, DeleteSandboxRequest, GetDraftPolicyRequest,
+    GetSandboxConfigRequest, ListSandboxesRequest, PolicyChunk, RejectDraftChunkRequest, Sandbox,
+    SandboxPhase, SandboxPolicy, SandboxSpec, StartSandboxRequest, StopSandboxRequest,
+    open_shell_client::OpenShellClient,
 };
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 
@@ -147,6 +149,73 @@ impl SandboxInfo {
     }
 }
 
+/// An allowed outbound endpoint from a sandbox's network policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AllowedEndpoint {
+    pub host: String,
+    pub port: u16,
+}
+
+/// A blocked request the policy advisor proposes to allow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Proposal {
+    pub chunk_id: String,
+    /// Must be echoed on approval so the gateway knows what was reviewed.
+    pub review_token: String,
+    pub host: String,
+    pub port: u16,
+    pub binary: String,
+    pub rationale: String,
+}
+
+impl Proposal {
+    /// The first endpoint of a pending chunk; chunks without one have nothing
+    /// to show or approve.
+    pub fn from_chunk(chunk: &PolicyChunk) -> Option<Self> {
+        let rule = chunk.proposed_rule.as_ref()?;
+        let endpoint = rule.endpoints.first()?;
+        let binary = if chunk.binary.is_empty() {
+            rule.binaries
+                .first()
+                .map(|b| b.path.clone())
+                .unwrap_or_default()
+        } else {
+            chunk.binary.clone()
+        };
+        Some(Self {
+            chunk_id: chunk.id.clone(),
+            review_token: chunk.review_token.clone(),
+            host: endpoint.host.clone(),
+            port: u16::try_from(endpoint.port).unwrap_or(0),
+            binary,
+            rationale: chunk.rationale.clone(),
+        })
+    }
+}
+
+pub fn allowed_endpoints(policy: &SandboxPolicy) -> Vec<AllowedEndpoint> {
+    let mut endpoints: Vec<_> = policy
+        .network_policies
+        .values()
+        .flat_map(|rule| rule.endpoints.iter())
+        .map(|e| AllowedEndpoint {
+            host: e.host.clone(),
+            port: u16::try_from(e.port).unwrap_or(0),
+        })
+        .collect();
+    endpoints.sort_by(|a, b| (&a.host, a.port).cmp(&(&b.host, b.port)));
+    endpoints.dedup();
+    endpoints
+}
+
+/// A sandbox with its policy and pending advisor proposals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Snapshot {
+    pub info: SandboxInfo,
+    pub allowed: Vec<AllowedEndpoint>,
+    pub proposals: Vec<Proposal>,
+}
+
 #[derive(Clone)]
 pub struct Gateway {
     client: OpenShellClient<Channel>,
@@ -198,6 +267,71 @@ impl Gateway {
             .iter()
             .map(SandboxInfo::from_proto)
             .collect())
+    }
+
+    /// Every sandbox with its policy and pending proposals. Policy lookups
+    /// that fail (a sandbox still provisioning has none) leave those parts empty.
+    pub async fn snapshot(&mut self) -> Result<Vec<Snapshot>, Error> {
+        let infos = self.list().await?;
+        let mut snapshots = Vec::with_capacity(infos.len());
+        for info in infos {
+            let allowed = self
+                .client
+                .get_sandbox_config(GetSandboxConfigRequest {
+                    workspace_scope: workspace(),
+                    name: info.name.clone(),
+                })
+                .await
+                .ok()
+                .and_then(|r| r.into_inner().policy)
+                .map(|p| allowed_endpoints(&p))
+                .unwrap_or_default();
+            let proposals = self
+                .client
+                .get_draft_policy(GetDraftPolicyRequest {
+                    workspace_scope: workspace(),
+                    status_filter: "pending".into(),
+                    sandbox: info.name.clone(),
+                })
+                .await
+                .ok()
+                .map(|r| r.into_inner().chunks)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(Proposal::from_chunk)
+                .collect();
+            snapshots.push(Snapshot {
+                info,
+                allowed,
+                proposals,
+            });
+        }
+        Ok(snapshots)
+    }
+
+    pub async fn approve(&mut self, sandbox: &str, proposal: &Proposal) -> Result<(), Error> {
+        self.client
+            .approve_draft_chunk(ApproveDraftChunkRequest {
+                workspace_scope: workspace(),
+                chunk_id: proposal.chunk_id.clone(),
+                review_token: proposal.review_token.clone(),
+                sandbox: sandbox.into(),
+                ..Default::default()
+            })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn reject(&mut self, sandbox: &str, chunk_id: &str) -> Result<(), Error> {
+        self.client
+            .reject_draft_chunk(RejectDraftChunkRequest {
+                workspace_scope: workspace(),
+                chunk_id: chunk_id.into(),
+                sandbox: sandbox.into(),
+                ..Default::default()
+            })
+            .await?;
+        Ok(())
     }
 
     pub async fn create(&mut self, name: &str, image: &str) -> Result<SandboxInfo, Error> {
@@ -315,6 +449,66 @@ mod tests {
             ),
             ("dev", State::Running, "ready", "ubuntu:24.04")
         );
+    }
+
+    #[test]
+    fn proposals_come_from_the_first_endpoint_of_a_pending_chunk() {
+        use openshell_core::proto::{NetworkBinary, NetworkEndpoint, NetworkPolicyRule};
+        let chunk = PolicyChunk {
+            id: "c1".into(),
+            review_token: "tok".into(),
+            proposed_rule: Some(NetworkPolicyRule {
+                endpoints: vec![NetworkEndpoint {
+                    host: "registry.npmjs.org".into(),
+                    port: 443,
+                    ..Default::default()
+                }],
+                binaries: vec![NetworkBinary {
+                    path: "/usr/bin/npm".into(),
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let proposal = Proposal::from_chunk(&chunk).unwrap();
+        assert_eq!(
+            (
+                proposal.host.as_str(),
+                proposal.port,
+                proposal.binary.as_str()
+            ),
+            ("registry.npmjs.org", 443, "/usr/bin/npm")
+        );
+        assert!(Proposal::from_chunk(&PolicyChunk::default()).is_none());
+    }
+
+    #[test]
+    fn allowed_endpoints_are_sorted_and_deduplicated() {
+        use openshell_core::proto::{NetworkEndpoint, NetworkPolicyRule};
+        let rule = |hosts: &[&str]| NetworkPolicyRule {
+            endpoints: hosts
+                .iter()
+                .map(|h| NetworkEndpoint {
+                    host: (*h).into(),
+                    port: 443,
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let policy = SandboxPolicy {
+            network_policies: [
+                ("a".to_owned(), rule(&["b.example", "a.example"])),
+                ("b".to_owned(), rule(&["a.example"])),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let hosts: Vec<_> = allowed_endpoints(&policy)
+            .into_iter()
+            .map(|e| e.host)
+            .collect();
+        assert_eq!(hosts, ["a.example", "b.example"]);
     }
 
     #[test]
