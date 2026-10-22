@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=OpenShell Desktop
+Comment=Manage NVIDIA OpenShell agent sandboxes on LXD
+Exec=openshell-desktop
+Icon=io.github.kenvandine.OpenShellDesktop
+Terminal=false
+Type=Application
+Categories=Development;System;
+Keywords=OpenShell;LXD;sandbox;agent;container;
+StartupNotify=true

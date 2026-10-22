@@ -1,0 +1,121 @@
+name: openshell-desktop
+title: OpenShell Desktop
+summary: GNOME manager for NVIDIA OpenShell agent sandboxes on LXD
+description: |
+  OpenShell Desktop configures, launches and monitors NVIDIA OpenShell agent
+  sandboxes running in local LXD containers or on a MicroCloud cluster.
+
+  The snap ships the desktop app and `openshell-driver-lxd`, the OpenShell
+  compute driver that runs sandboxes as LXD containers. Both talk to LXD over
+  its REST socket, so connect the `lxd` interface:
+
+    sudo snap connect openshell-desktop:lxd lxd:lxd
+
+  The driver daemon is disabled by default while it is in development. Start
+  it with:
+
+    sudo snap start --enable openshell-desktop.lxd-driver
+
+  and point an OpenShell gateway at its socket,
+  /var/snap/openshell-desktop/common/lxd-driver.sock.
+adopt-info: openshell-desktop
+license: Apache-2.0
+base: core24
+grade: devel
+confinement: strict
+platforms:
+  amd64:
+  arm64:
+
+slots:
+  # GApplication owns its application ID on the session bus; strict snaps
+  # may only own names they declare.
+  dbus-openshell-desktop:
+    interface: dbus
+    bus: session
+    name: io.github.kenvandine.OpenShellDesktop
+
+apps:
+  openshell-desktop:
+    command: bin/openshell-desktop
+    desktop: usr/share/applications/io.github.kenvandine.OpenShellDesktop.desktop
+    common-id: io.github.kenvandine.OpenShellDesktop
+    extensions: [gnome]
+    environment:
+      # libghostty-vt is a private shared library in $SNAP/lib.
+      LD_LIBRARY_PATH: $SNAP/lib:${LD_LIBRARY_PATH}
+    plugs:
+      - lxd
+      - network
+    slots:
+      - dbus-openshell-desktop
+
+  lxd-driver:
+    command: bin/openshell-driver-lxd --socket $SNAP_COMMON/lxd-driver.sock --staging-dir $SNAP_COMMON/staging
+    daemon: simple
+    install-mode: disable
+    restart-condition: on-failure
+    plugs:
+      - lxd
+      - network
+
+parts:
+  libghostty-vt:
+    plugin: nil
+    source: .
+    source-type: local
+    build-packages:
+      - curl
+      - git
+      - xz-utils
+    override-build: |
+      # libghostty-vt is built with Zig, pinned like CI and the dev script.
+      ZIG_VERSION=0.17.0
+      case "$CRAFT_ARCH_BUILD_FOR" in
+        amd64) zig_arch=x86_64 ;;
+        arm64) zig_arch=aarch64 ;;
+        *) echo "unsupported architecture $CRAFT_ARCH_BUILD_FOR" >&2; exit 1 ;;
+      esac
+      mkdir -p "$CRAFT_PART_BUILD/zig"
+      curl -fsSL "https://ziglang.org/download/$ZIG_VERSION/zig-$zig_arch-linux-$ZIG_VERSION.tar.xz" \
+        | tar -xJ --strip-components=1 -C "$CRAFT_PART_BUILD/zig"
+      export PATH="$CRAFT_PART_BUILD/zig:$PATH"
+      # Zig cannot parse the build instance's resolv.conf; give it a clean one.
+      ZIG_CLEAN_RESOLV_CONF=1 scripts/build-libghostty-vt.sh "$CRAFT_PART_INSTALL"
+    # Headers and the .pc file are only needed to build the app.
+    prime:
+      - lib/libghostty-vt*.so*
+
+  openshell-desktop:
+    after: [libghostty-vt]
+    # Built with a rustup toolchain rather than the rust plugin: the code
+    # needs edition 2024 (newer than core24's rustc), and the rust plugin's
+    # rustup check does not see the rustup snap under the GNOME extension.
+    plugin: nil
+    source: .
+    build-packages:
+      - cmake
+      - curl
+      - libclang-dev
+      - pkg-config
+    build-environment:
+      - PKG_CONFIG_PATH: $CRAFT_STAGE/share/pkgconfig:${PKG_CONFIG_PATH:-}
+      - LIBRARY_PATH: $CRAFT_STAGE/lib:${LIBRARY_PATH:-}
+      - RUSTUP_HOME: $CRAFT_PART_BUILD/.rustup
+      - CARGO_HOME: $CRAFT_PART_BUILD/.cargo
+    override-pull: |
+      craftctl default
+      craftctl set version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)+git$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    override-build: |
+      curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
+        | sh -s -- -y --no-modify-path --profile minimal --default-toolchain stable
+      export PATH="$CARGO_HOME/bin:$PATH"
+      cargo build --release --locked --workspace --bins
+      install -Dm755 target/release/openshell-desktop "$CRAFT_PART_INSTALL/bin/openshell-desktop"
+      install -Dm755 target/release/openshell-driver-lxd "$CRAFT_PART_INSTALL/bin/openshell-driver-lxd"
+      install -Dm644 data/io.github.kenvandine.OpenShellDesktop.desktop \
+        "$CRAFT_PART_INSTALL/usr/share/applications/io.github.kenvandine.OpenShellDesktop.desktop"
+      install -Dm644 data/icons/io.github.kenvandine.OpenShellDesktop.svg \
+        "$CRAFT_PART_INSTALL/usr/share/icons/hicolor/scalable/apps/io.github.kenvandine.OpenShellDesktop.svg"
+      sed -i 's|^Icon=.*|Icon=${SNAP}/usr/share/icons/hicolor/scalable/apps/io.github.kenvandine.OpenShellDesktop.svg|' \
+        "$CRAFT_PART_INSTALL/usr/share/applications/io.github.kenvandine.OpenShellDesktop.desktop"

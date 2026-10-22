@@ -198,6 +198,8 @@ The UI adheres to the GNOME HIG using Libadwaita.
   → Answered in [`compute-driver-research.md`](compute-driver-research.md).
 - [x] **Prototype the GUI:** Bootstrap a GTK4/Libadwaita application skeleton
   (`Adw.ApplicationWindow`, `Adw.PreferencesPage` for sandbox policies).
+- [x] **LXD compute driver (lifecycle):** `crates/openshell-driver-lxd`, see
+  [`lxd-driver.md`](lxd-driver.md). Supervisor companion still to do.
 - [ ] **Socket testing:** Exercise basic container lifecycle operations against
   the local `/var/snap/lxd/common/lxd/unix.socket` to validate security
   profiles before hooking in the OpenShell gateway.

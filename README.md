@@ -11,6 +11,8 @@ agent sandboxes, running on local LXD or a MicroCloud cluster.
 - [Product & technical spec](docs/SPEC.md)
 - [Compute driver research](docs/compute-driver-research.md): why we need an
   out-of-tree `openshell-driver-lxd` and how it plugs into the gateway.
+- [LXD compute driver](docs/lxd-driver.md): design, OCI image import, and
+  what is still missing.
 
 ## Building
 
@@ -29,6 +31,19 @@ scripts/build-libghostty-vt.sh          # builds into vendor/ghostty-vt
 export PKG_CONFIG_PATH=$PWD/vendor/ghostty-vt/share/pkgconfig
 export LD_LIBRARY_PATH=$PWD/vendor/ghostty-vt/lib
 cargo run
+```
+
+## Snap
+
+`snap/snapcraft.yaml` builds a strict `core24` snap with the app (using the
+GNOME extension) and the `openshell-driver-lxd` daemon, which is disabled by
+default. The **Snap** workflow builds it for amd64 and arm64 on every push and
+pull request and uploads the `.snap` as a build artifact.
+
+```sh
+snapcraft                                # or: snapcraft --use-lxd
+sudo snap install --dangerous openshell-desktop_*.snap
+sudo snap connect openshell-desktop:lxd lxd:lxd
 ```
 
 ## Debug console
@@ -51,4 +66,5 @@ session will come through the OpenShell gateway.
 | `src/ui/console.rs` | Debug console window |
 | `src/terminal/` | libghostty-vt bindings, safe wrapper and the GTK terminal widget |
 | `src/model.rs` | View-model types; live LXD instances or sample data |
+| `crates/openshell-driver-lxd` | OpenShell compute driver: gRPC on a Unix socket for the gateway, sandboxes as LXD containers, OCI → LXD image import |
 | `crates/openshell-lxd` | GTK-free LXD REST client and exec console bridge (reusable by the LXD compute driver) |
