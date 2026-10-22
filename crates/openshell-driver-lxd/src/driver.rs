@@ -732,6 +732,16 @@ impl LxdDriver {
         self.lxd
             .set_state(&names.workload, "start", false, -1)
             .await?;
+        if self
+            .lxd
+            .instance(&names.workload)
+            .await?
+            .is_none_or(|w| w.status != "Running")
+        {
+            return Err(DriverError::Internal(
+                "the sandbox runtime exited while starting".into(),
+            ));
+        }
         // The control volume's root belongs to root; both containers run as
         // the workload identity, so give it a directory inside the volume.
         // The runtime retries dialing until the supervisor binds the socket.
@@ -775,7 +785,20 @@ impl LxdDriver {
     async fn with_consoles(&self, error: DriverError, names: &Names) -> DriverError {
         let mut extra = String::new();
         for name in [&names.workload, &names.supervisor] {
-            let console = self.lxd.console_tail(name, 15).await;
+            // LXD answers nothing useful while an exiting instance is still
+            // being stopped; give it a moment to settle.
+            let mut console = String::new();
+            for _ in 0..10 {
+                let settled = matches!(
+                    self.lxd.instance(name).await,
+                    Ok(Some(ref i)) if i.status == "Stopped" || i.status == "Running"
+                );
+                console = self.lxd.console_tail(name, 15).await;
+                if settled && !console.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
             if !console.is_empty() {
                 extra.push_str(&format!("\n{name} console:\n{console}"));
             }
