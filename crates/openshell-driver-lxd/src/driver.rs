@@ -17,7 +17,7 @@
 //! until the authenticated supervisor confirms the boundary.
 
 use std::collections::{BTreeSet, HashMap};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -165,17 +165,30 @@ impl ImageSource for Importer {
     }
 }
 
+/// The LXD managed network the supervisor joins by default.
+pub const DEFAULT_SUPERVISOR_NETWORK: &str = "lxdbr0";
+
+/// Name the supervisor dials for the gateway; `/etc/hosts` maps it to the
+/// host address, and the gateway's certificate carries it.
+pub const HOST_ALIAS: &str = "host.openshell.internal";
+
 /// How the supervisor reaches the host network.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SupervisorNetwork {
     /// Share the host's network namespace, as OpenShell's Podman driver does
-    /// (`netns host`). The supervisor reaches the gateway on the host's
-    /// loopback and needs no DHCP client in its image.
-    #[default]
+    /// (`netns host`). LXD only allows this for privileged containers:
+    /// liblxc cannot mount sysfs for an unprivileged one.
     Host,
     /// Attach to this LXD managed network with a bridged NIC. The supervisor
-    /// image must bring the interface up itself (DHCP or static).
+    /// image has no DHCP client, so it gets a static address that LXD
+    /// reserves on the network and liblxc configures before init runs.
     Bridge(String),
+}
+
+impl Default for SupervisorNetwork {
+    fn default() -> Self {
+        Self::Bridge(DEFAULT_SUPERVISOR_NETWORK.into())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -203,7 +216,8 @@ pub struct DriverConfig {
     /// Address the supervisor dials for the host. Defaults to loopback for
     /// [`SupervisorNetwork::Host`] and the bridge's address for a bridge.
     pub host_gateway_ip: Option<IpAddr>,
-    /// `/etc/resolv.conf` content for the supervisor.
+    /// `/etc/resolv.conf` content for the supervisor. Defaults to the
+    /// bridge's DNS server for [`SupervisorNetwork::Bridge`].
     pub resolv_conf: Option<Vec<u8>>,
 }
 
@@ -220,7 +234,7 @@ impl Default for DriverConfig {
             tls_ca: None,
             sandbox_runtime_image: openshell_core::config::default_sandbox_runtime_image(),
             supervisor_image: openshell_core::config::default_supervisor_image(),
-            network: SupervisorNetwork::Host,
+            network: SupervisorNetwork::default(),
             host_gateway_ip: None,
             resolv_conf: None,
         }
@@ -299,7 +313,6 @@ impl LxdDriver {
         }
 
         let artifacts = self.fetch_artifacts(&plan).await?;
-        let host_gateway_ip = self.host_gateway_ip().await?;
         info!(
             sandbox_id = %sandbox.id,
             instance = %names.workload,
@@ -313,7 +326,7 @@ impl LxdDriver {
             .await?;
         // Everything after the first LXD object exists must clean up on failure.
         let result = self
-            .provision(sandbox, &plan, &names, &artifacts, &launch, host_gateway_ip)
+            .provision(sandbox, &plan, &names, &artifacts, &launch)
             .await;
         if let Err(error) = result {
             warn!(sandbox_id = %sandbox.id, %error, "sandbox create failed; removing instances");
@@ -365,6 +378,26 @@ impl LxdDriver {
         }
     }
 
+    /// A free address on the supervisor's bridge, or `None` on the host
+    /// network.
+    async fn supervisor_address(&self, sandbox_id: &str) -> Result<Option<StaticAddress>> {
+        let SupervisorNetwork::Bridge(network) = &self.config.network else {
+            return Ok(None);
+        };
+        let (gateway, prefix) = self.lxd.network_ipv4_cidr(network).await?.ok_or_else(|| {
+            DriverError::Precondition(format!("LXD network {network} has no IPv4 subnet"))
+        })?;
+        let used = self.lxd.network_leases(network).await?;
+        let address = pick_address(gateway, prefix, &used, sandbox_id).ok_or_else(|| {
+            DriverError::Precondition(format!("LXD network {network} has no free IPv4 address"))
+        })?;
+        Ok(Some(StaticAddress {
+            address,
+            prefix,
+            gateway,
+        }))
+    }
+
     /// Creates, stages and starts both instances.
     async fn provision(
         &self,
@@ -373,8 +406,9 @@ impl LxdDriver {
         names: &Names,
         artifacts: &Artifacts,
         launch: &SandboxLaunchAuthentication,
-        host_gateway_ip: IpAddr,
     ) -> Result<()> {
+        let host_gateway_ip = self.host_gateway_ip().await?;
+        let address = self.supervisor_address(&sandbox.id).await?;
         self.lxd
             .create_instance(&self.workload_body(names, sandbox, plan, &artifacts.workload))
             .await?;
@@ -428,6 +462,7 @@ impl LxdDriver {
                 sandbox,
                 &artifacts.supervisor,
                 &identity,
+                address.as_ref(),
             ))
             .await?;
 
@@ -474,7 +509,7 @@ impl LxdDriver {
             },
         )
         .await?;
-        self.stage_supervisor_extras(names, sandbox, &identity, &workspace)
+        self.stage_supervisor_extras(names, sandbox, &identity, &workspace, host_gateway_ip)
             .await?;
 
         // Instance configuration that depends on the resolved identity.
@@ -489,7 +524,7 @@ impl LxdDriver {
                     ],
                     &identity,
                     "/",
-                    false,
+                    &[],
                 )?,
             ),
             (KEY_UID.to_owned(), identity.uid.to_string()),
@@ -515,7 +550,7 @@ impl LxdDriver {
                     &self.supervisor_command(&workspace),
                     &identity,
                     "/",
-                    self.config.network == SupervisorNetwork::Host,
+                    &supervisor_network_lxc(address.as_ref()),
                 )?,
             ),
             (KEY_STARTING.to_owned(), "true".to_owned()),
@@ -577,6 +612,7 @@ impl LxdDriver {
         sandbox: &DriverSandbox,
         identity: &Identity,
         workspace: &str,
+        host_gateway_ip: IpAddr,
     ) -> Result<()> {
         let owned = |mode| FileMeta {
             uid: identity.uid,
@@ -590,18 +626,32 @@ impl LxdDriver {
         self.lxd
             .ensure_dir(&names.supervisor, "/run/openshell", owned(0o755))
             .await?;
-        if let Some(resolv) = &self.config.resolv_conf {
+        let system_file = FileMeta {
+            uid: 0,
+            gid: 0,
+            mode: 0o644,
+        };
+        let hosts = format!("127.0.0.1 localhost\n::1 localhost\n{host_gateway_ip} {HOST_ALIAS}\n");
+        self.lxd
+            .push_file(
+                &names.supervisor,
+                "/etc/hosts",
+                hosts.as_bytes(),
+                system_file,
+            )
+            .await?;
+        // The bridge's dnsmasq answers DNS; the host's stub resolver is
+        // loopback only.
+        let resolv = match (&self.config.resolv_conf, &self.config.network) {
+            (Some(resolv), _) => Some(resolv.clone()),
+            (None, SupervisorNetwork::Bridge(_)) => {
+                Some(format!("nameserver {host_gateway_ip}\n").into_bytes())
+            }
+            (None, SupervisorNetwork::Host) => None,
+        };
+        if let Some(resolv) = resolv {
             self.lxd
-                .push_file(
-                    &names.supervisor,
-                    "/etc/resolv.conf",
-                    resolv,
-                    FileMeta {
-                        uid: 0,
-                        gid: 0,
-                        mode: 0o644,
-                    },
-                )
+                .push_file(&names.supervisor, "/etc/resolv.conf", &resolv, system_file)
                 .await?;
         }
         if let Some(ca) = &self.config.tls_ca {
@@ -1274,6 +1324,7 @@ impl LxdDriver {
         sandbox: &DriverSandbox,
         image: &ImportedImage,
         _identity: &Identity,
+        address: Option<&StaticAddress>,
     ) -> Value {
         let config = self.base_config(names, sandbox, isolation::ROLE_SUPERVISOR, image);
         let mut devices = json!({
@@ -1286,7 +1337,12 @@ impl LxdDriver {
             },
         });
         if let SupervisorNetwork::Bridge(network) = &self.config.network {
-            devices["eth0"] = json!({ "type": "nic", "network": network, "name": "eth0" });
+            let mut nic = json!({ "type": "nic", "network": network, "name": "eth0" });
+            // Reserves the address so the network's DHCP never leases it.
+            if let Some(address) = address {
+                nic["ipv4.address"] = json!(address.address.to_string());
+            }
+            devices["eth0"] = nic;
         }
         json!({
             "name": names.supervisor,
@@ -1430,6 +1486,47 @@ impl Names {
             volume: named(VOLUME_PREFIX, sandbox_id),
         }
     }
+}
+
+/// The supervisor's address on its bridge, which liblxc configures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StaticAddress {
+    address: Ipv4Addr,
+    prefix: u8,
+    gateway: Ipv4Addr,
+}
+
+/// `raw.lxc` lines for the supervisor's network: a static address on the
+/// bridged NIC, or the host's network namespace.
+fn supervisor_network_lxc(address: Option<&StaticAddress>) -> Vec<String> {
+    match address {
+        Some(address) => vec![
+            format!(
+                "lxc.net.0.ipv4.address = {}/{}",
+                address.address, address.prefix
+            ),
+            format!("lxc.net.0.ipv4.gateway = {}", address.gateway),
+        ],
+        None => vec!["lxc.net.0.type = none".to_owned()],
+    }
+}
+
+/// A host address in `gateway`'s subnet that is not the gateway or in
+/// `used`. The search starts at a point derived from `seed`, so concurrent
+/// creates rarely race for the same address.
+fn pick_address(gateway: Ipv4Addr, prefix: u8, used: &[Ipv4Addr], seed: &str) -> Option<Ipv4Addr> {
+    if !(8..=30).contains(&prefix) {
+        return None;
+    }
+    let size = 1u32 << (32 - prefix);
+    let network = u32::from(gateway) & !(size - 1);
+    // Host numbers run from 1 to size - 2; the ends are the network and
+    // broadcast addresses.
+    let hosts = size - 2;
+    let start = (fnv1a(seed.as_bytes()) % u64::from(hosts)) as u32;
+    (0..hosts)
+        .map(|offset| Ipv4Addr::from(network + 1 + (start + offset) % hosts))
+        .find(|candidate| *candidate != gateway && !used.contains(candidate))
 }
 
 /// Inputs for writing the bootstrap material.
@@ -1756,13 +1853,13 @@ pub fn resolve_identity(
     .map_err(invalid)
 }
 
-/// `raw.lxc` that makes `command` LXC's init process under `identity`. With
-/// `host_network`, the container shares the host's network namespace.
+/// `raw.lxc` that makes `command` LXC's init process under `identity`,
+/// followed by the `network` lines.
 fn raw_lxc(
     command: &[String],
     identity: &Identity,
     working_dir: &str,
-    host_network: bool,
+    network: &[String],
 ) -> Result<String> {
     let mut words = Vec::with_capacity(command.len());
     for arg in command {
@@ -1783,9 +1880,7 @@ fn raw_lxc(
             join_ids(&identity.supplementary_gids)
         ));
     }
-    if host_network {
-        lines.push("lxc.net.0.type = none".to_owned());
-    }
+    lines.extend_from_slice(network);
     Ok(lines.join("\n"))
 }
 
@@ -1924,19 +2019,63 @@ mod tests {
             &["/bin/sh".into(), "-c".into(), "echo hi there".into()],
             &identity,
             "/work",
-            false,
+            &[],
         )
         .unwrap();
         assert_eq!(
             raw,
             "lxc.init.cmd = /bin/sh -c \"echo hi there\"\nlxc.init.uid = 1000\nlxc.init.gid = 1000\nlxc.init.cwd = /work\nlxc.no_new_privs = 1\nlxc.init.groups = 44"
         );
-        assert!(raw_lxc(&["say \"hi\"".into()], &identity, "/", false).is_err());
+        assert!(raw_lxc(&["say \"hi\"".into()], &identity, "/", &[]).is_err());
         assert!(
-            raw_lxc(&["/x".into()], &identity, "/", true)
-                .unwrap()
-                .ends_with("lxc.net.0.type = none")
+            raw_lxc(
+                &["/x".into()],
+                &identity,
+                "/",
+                &supervisor_network_lxc(None)
+            )
+            .unwrap()
+            .ends_with("lxc.net.0.type = none")
         );
+        let address = StaticAddress {
+            address: Ipv4Addr::new(10, 0, 3, 7),
+            prefix: 24,
+            gateway: Ipv4Addr::new(10, 0, 3, 1),
+        };
+        assert!(
+            raw_lxc(
+                &["/x".into()],
+                &identity,
+                "/",
+                &supervisor_network_lxc(Some(&address))
+            )
+            .unwrap()
+            .ends_with("lxc.net.0.ipv4.address = 10.0.3.7/24\nlxc.net.0.ipv4.gateway = 10.0.3.1")
+        );
+    }
+
+    #[test]
+    fn picks_free_bridge_addresses() {
+        let gateway = Ipv4Addr::new(10, 0, 3, 1);
+        let address = pick_address(gateway, 24, &[], "sbx-1").unwrap();
+        assert_eq!(address.octets()[..3], [10, 0, 3]);
+        assert!(!matches!(address.octets()[3], 0 | 1 | 255));
+        // Stable for a sandbox, and skips taken addresses.
+        assert_eq!(pick_address(gateway, 24, &[], "sbx-1"), Some(address));
+        assert_ne!(
+            pick_address(gateway, 24, &[address], "sbx-1"),
+            Some(address)
+        );
+        // A /30 has two hosts: the gateway and one more.
+        assert_eq!(
+            pick_address(gateway, 30, &[], "x"),
+            Some(Ipv4Addr::new(10, 0, 3, 2))
+        );
+        assert_eq!(
+            pick_address(gateway, 30, &[Ipv4Addr::new(10, 0, 3, 2)], "x"),
+            None
+        );
+        assert_eq!(pick_address(gateway, 31, &[], "x"), None);
     }
 
     #[test]

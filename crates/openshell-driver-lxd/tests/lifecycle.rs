@@ -247,6 +247,13 @@ impl FakeLxd {
                 };
                 Ok(Response::new(Full::new(Bytes::from(file))))
             }
+            ("GET", ["networks", "lxdbr0"]) => {
+                ok(sync(json!({ "config": { "ipv4.address": "10.0.3.1/24" } })))
+            }
+            ("GET", ["networks", "lxdbr0", "leases"]) => ok(sync(json!([
+                { "hostname": "lxdbr0.gw", "address": "10.0.3.1", "type": "gateway" },
+                { "hostname": "other", "address": "10.0.3.50", "type": "dynamic" },
+            ]))),
             ("POST", ["storage-pools", _, "volumes", "custom"]) => {
                 self.state
                     .lock()
@@ -649,10 +656,19 @@ async fn provisions_a_workload_and_supervisor_pair() {
     assert!(
         raw.contains("--backend-descriptor-file=/.openshell/supervisor/runtime-descriptor.json")
     );
+    // A static address on lxdbr0, reserved on the NIC and set by liblxc.
+    let nic = &supervisor_body["devices"]["eth0"];
+    assert_eq!(nic["network"], "lxdbr0");
+    let address = nic["ipv4.address"].as_str().unwrap();
+    assert!(address.starts_with("10.0.3.") && !["10.0.3.1", "10.0.3.50"].contains(&address));
     assert!(
-        raw.contains("lxc.net.0.type = none"),
-        "host network by default: {raw}"
+        raw.contains(&format!("lxc.net.0.ipv4.address = {address}/24"))
+            && raw.contains("lxc.net.0.ipv4.gateway = 10.0.3.1")
+            && !raw.contains("lxc.net.0.type"),
+        "bridged network by default: {raw}"
     );
+    let hosts = state.file("openshell-sup-sbx-1", "/etc/hosts").unwrap();
+    assert!(String::from_utf8_lossy(&hosts.content).contains("10.0.3.1 host.openshell.internal"));
     assert_eq!(
         supervisor.config["environment.OPENSHELL_SANDBOX_ID"],
         "sbx-1"

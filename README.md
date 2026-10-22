@@ -72,8 +72,10 @@ systemctl --user enable --now snap.openshell-desktop.lxd-driver.service \
   snap.openshell-desktop.gateway.service
 ```
 
-The gateway listens on `127.0.0.1:17671` (`snap set openshell-desktop
-gateway-port=…` to change it; OpenShell's own snap uses 17670). See
+The gateway listens on port 17671 (`snap set openshell-desktop
+gateway-port=…` to change it; OpenShell's own snap uses 17670). It accepts
+connections on every interface, because sandbox supervisors reach it over
+`lxdbr0`; clients still need its mTLS certificate. See
 [docs/lxd-driver.md](docs/lxd-driver.md#bundled-gateway-snap).
 
 ## Layout

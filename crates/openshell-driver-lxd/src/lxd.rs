@@ -350,12 +350,35 @@ impl Client {
     /// The managed network's IPv4 address (the host side of a bridge), for
     /// example `10.12.34.1`.
     pub async fn network_ipv4(&self, network: &str) -> Result<Option<String>> {
+        Ok(self
+            .network_ipv4_cidr(network)
+            .await?
+            .map(|(address, _)| address.to_string()))
+    }
+
+    /// The managed network's IPv4 address and prefix length, from its
+    /// `ipv4.address` (for example `10.12.34.1/24`).
+    pub async fn network_ipv4_cidr(
+        &self,
+        network: &str,
+    ) -> Result<Option<(std::net::Ipv4Addr, u8)>> {
         let metadata = self.get(&format!("/1.0/networks/{network}")).await?;
         Ok(metadata["config"]["ipv4.address"]
             .as_str()
-            .and_then(|cidr| cidr.split('/').next())
-            .filter(|ip| ip.parse::<std::net::Ipv4Addr>().is_ok())
-            .map(str::to_owned))
+            .and_then(|cidr| cidr.split_once('/'))
+            .and_then(|(ip, prefix)| Some((ip.parse().ok()?, prefix.parse().ok()?)))
+            .filter(|&(_, prefix): &(_, u8)| prefix <= 32))
+    }
+
+    /// IPv4 addresses the managed network has handed out or reserved.
+    pub async fn network_leases(&self, network: &str) -> Result<Vec<std::net::Ipv4Addr>> {
+        let leases = self.get(&format!("/1.0/networks/{network}/leases")).await?;
+        Ok(leases
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|lease| lease["address"].as_str()?.parse().ok())
+            .collect())
     }
 
     /// Returns the fingerprint behind an image alias, if the alias exists.

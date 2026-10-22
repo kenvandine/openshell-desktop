@@ -8,12 +8,21 @@
 # The port differs from the OpenShell snap's 17670 so both can run. Change it
 # with `snap set openshell-desktop gateway-port=...`, and the driver's
 # grpc-endpoint to match.
+#
+# Sandbox supervisors dial the gateway over the lxdbr0 bridge, so it listens
+# on every interface by default. Clients still need the local mTLS
+# certificate, and supervisors their sandbox token. To listen on loopback
+# only (for `supervisor-network=host`):
+#
+#   snap set openshell-desktop gateway-bind-address=127.0.0.1
 set -eu
 
 tls_dir="${OPENSHELL_LOCAL_TLS_DIR:?OPENSHELL_LOCAL_TLS_DIR is not set}"
 state_dir="${SNAP_USER_COMMON}/gateway"
 port="$(snapctl get gateway-port)"
 : "${port:=17671}"
+bind="$(snapctl get gateway-bind-address)"
+: "${bind:=0.0.0.0}"
 
 mkdir -p -m 700 "$state_dir" "$tls_dir"
 
@@ -23,6 +32,7 @@ mkdir -p -m 700 "$state_dir" "$tls_dir"
 	--server-san host.openshell.internal
 
 exec "$SNAP/bin/openshell-gateway" \
+	--bind-address "$bind" \
 	--port "$port" \
 	--db-url "sqlite:$state_dir/gateway.db?mode=rwc" \
 	--compute-driver lxd \

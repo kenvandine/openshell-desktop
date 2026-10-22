@@ -1,9 +1,14 @@
 #!/bin/sh
 # Starts the LXD compute driver for the bundled gateway. Optional snap config:
 #
-#   snap set openshell-desktop grpc-endpoint=https://127.0.0.1:17671
+#   snap set openshell-desktop grpc-endpoint=https://host.openshell.internal:17671
 #   snap set openshell-desktop tls-ca=/path/to/ca.crt
 #   snap set openshell-desktop supervisor-network=lxdbr0
+#
+# Supervisors join the lxdbr0 bridge by default and reach the gateway as
+# host.openshell.internal, which the driver maps to the bridge's address.
+# `supervisor-network=host` shares the host's network namespace instead, and
+# only works with privileged LXD containers.
 set -eu
 
 endpoint="$(snapctl get grpc-endpoint)"
@@ -11,7 +16,11 @@ tls_ca="$(snapctl get tls-ca)"
 network="$(snapctl get supervisor-network)"
 port="$(snapctl get gateway-port)"
 : "${port:=17671}"
-: "${endpoint:=https://127.0.0.1:$port}"
+if [ "$network" = host ]; then
+	: "${endpoint:=https://127.0.0.1:$port}"
+else
+	: "${endpoint:=https://host.openshell.internal:$port}"
+fi
 : "${tls_ca:=$OPENSHELL_LOCAL_TLS_DIR/ca.crt}"
 
 mkdir -p "$SNAP_USER_COMMON/staging"

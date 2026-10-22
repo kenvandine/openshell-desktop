@@ -17,7 +17,9 @@ use std::sync::Arc;
 
 use clap::Parser;
 use openshell_core::resource_admission::DriverAdmissionConfig;
-use openshell_driver_lxd::driver::{DEFAULT_IMAGE, DriverConfig, LxdDriver, SupervisorNetwork};
+use openshell_driver_lxd::driver::{
+    DEFAULT_IMAGE, DEFAULT_SUPERVISOR_NETWORK, DriverConfig, LxdDriver, SupervisorNetwork,
+};
 use openshell_driver_lxd::lxd;
 use openshell_driver_lxd::oci::Importer;
 use openshell_driver_lxd::proto::compute::v1::compute_driver_server::ComputeDriverServer;
@@ -99,19 +101,21 @@ struct Args {
     #[arg(long, env = "OPENSHELL_SUPERVISOR_IMAGE")]
     supervisor_image: Option<String>,
 
-    /// Run the supervisor on this LXD managed network instead of the host's
-    /// network namespace. Its image must configure the interface itself.
-    #[arg(long)]
-    supervisor_network: Option<String>,
+    /// LXD managed network the supervisor joins with a static address, or
+    /// `host` for the host's network namespace (privileged LXD only).
+    #[arg(long, default_value = DEFAULT_SUPERVISOR_NETWORK)]
+    supervisor_network: String,
 
-    /// Address the supervisor dials to reach the host. Defaults to loopback,
-    /// or the bridge's address with `--supervisor-network`.
+    /// Address the supervisor dials to reach the host. Defaults to the
+    /// bridge's address, or loopback with `--supervisor-network host`.
     #[arg(long)]
     host_gateway_ip: Option<std::net::IpAddr>,
 
-    /// File copied to the supervisor as `/etc/resolv.conf`.
-    #[arg(long, default_value = "/etc/resolv.conf")]
-    resolv_conf: PathBuf,
+    /// File copied to the supervisor as `/etc/resolv.conf`. Defaults to the
+    /// bridge's DNS server, or the host's file with `--supervisor-network
+    /// host`.
+    #[arg(long)]
+    resolv_conf: Option<PathBuf>,
 }
 
 fn parse_mode(value: &str) -> Result<u32, String> {
@@ -133,6 +137,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_else(|| std::env::temp_dir().join("openshell-driver-lxd"))
     });
     let defaults = DriverConfig::default();
+    let network = match args.supervisor_network.as_str() {
+        "host" => SupervisorNetwork::Host,
+        bridge => SupervisorNetwork::Bridge(bridge.to_owned()),
+    };
     let config = DriverConfig {
         storage_pool: args.storage_pool,
         default_image: args.default_image,
@@ -147,11 +155,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .sandbox_runtime_image
             .unwrap_or(defaults.sandbox_runtime_image),
         supervisor_image: args.supervisor_image.unwrap_or(defaults.supervisor_image),
-        network: args
-            .supervisor_network
-            .map_or(SupervisorNetwork::Host, SupervisorNetwork::Bridge),
+        resolv_conf: args
+            .resolv_conf
+            .or_else(|| (network == SupervisorNetwork::Host).then(|| "/etc/resolv.conf".into()))
+            .and_then(|path| std::fs::read(path).ok()),
+        network,
         host_gateway_ip: args.host_gateway_ip,
-        resolv_conf: std::fs::read(&args.resolv_conf).ok(),
         ..defaults
     };
 
