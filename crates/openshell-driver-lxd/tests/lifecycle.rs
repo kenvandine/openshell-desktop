@@ -217,6 +217,16 @@ impl FakeLxd {
                 let Some(instance) = state.instances.get_mut(*name) else {
                     return Ok(not_found());
                 };
+                // Like LXD, an existing directory keeps its owner and mode,
+                // whatever X-LXD-modify-perm asks for.
+                if header("x-lxd-type") == "directory"
+                    && instance
+                        .files
+                        .get(&pushed_path)
+                        .is_some_and(|f| f.kind == "directory")
+                {
+                    return ok(sync(json!({})));
+                }
                 instance.files.insert(
                     pushed_path,
                     Pushed {
@@ -679,6 +689,8 @@ async fn provisions_a_workload_and_supervisor_pair() {
             && !raw.contains("lxc.net.0.type"),
         "bridged network by default: {raw}"
     );
+    let run = state.file("openshell-sup-sbx-1", "/run/openshell").unwrap();
+    assert_eq!((run.uid.as_str(), run.gid.as_str()), ("1000", "1000"));
     let hosts = state.file("openshell-sup-sbx-1", "/etc/hosts").unwrap();
     assert!(String::from_utf8_lossy(&hosts.content).contains("10.0.3.1 host.openshell.internal"));
     assert_eq!(

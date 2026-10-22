@@ -622,10 +622,12 @@ impl LxdDriver {
             gid: identity.gid,
             mode,
         };
-        // Writable scratch for a non-root supervisor.
-        for dir in ["/run", "/run/openshell"] {
-            self.lxd.make_dir(&names.supervisor, dir, ROOT_DIR).await?;
-        }
+        // Writable scratch for a non-root supervisor, which tightens it to
+        // 0700 itself. LXD only applies an owner when it creates the
+        // directory, so it must not exist before this push.
+        self.lxd
+            .make_dir(&names.supervisor, "/run", ROOT_DIR)
+            .await?;
         self.lxd
             .ensure_dir(&names.supervisor, "/run/openshell", owned(0o755))
             .await?;
