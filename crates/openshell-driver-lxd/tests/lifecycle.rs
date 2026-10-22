@@ -217,6 +217,16 @@ impl FakeLxd {
                 let Some(instance) = state.instances.get_mut(*name) else {
                     return Ok(not_found());
                 };
+                // Like LXD, an existing directory keeps its owner and mode,
+                // whatever X-LXD-modify-perm asks for.
+                if header("x-lxd-type") == "directory"
+                    && instance
+                        .files
+                        .get(&pushed_path)
+                        .is_some_and(|f| f.kind == "directory")
+                {
+                    return ok(sync(json!({})));
+                }
                 instance.files.insert(
                     pushed_path,
                     Pushed {
@@ -247,6 +257,13 @@ impl FakeLxd {
                 };
                 Ok(Response::new(Full::new(Bytes::from(file))))
             }
+            ("GET", ["networks", "lxdbr0"]) => {
+                ok(sync(json!({ "config": { "ipv4.address": "10.0.3.1/24" } })))
+            }
+            ("GET", ["networks", "lxdbr0", "leases"]) => ok(sync(json!([
+                { "hostname": "lxdbr0.gw", "address": "10.0.3.1", "type": "gateway" },
+                { "hostname": "other", "address": "10.0.3.50", "type": "dynamic" },
+            ]))),
             ("POST", ["storage-pools", _, "volumes", "custom"]) => {
                 self.state
                     .lock()
@@ -589,7 +606,24 @@ async fn provisions_a_workload_and_supervisor_pair() {
         "{raw}"
     );
     assert!(raw.contains("lxc.init.uid = 1000") && raw.contains("lxc.no_new_privs = 1"));
-    assert!(!raw.contains("lxc.net"), "{raw}");
+    // Loopback only: an empty network entry brought up, and no NIC device.
+    assert!(
+        raw.contains("lxc.net.0.type = empty") && raw.contains("lxc.net.0.flags = up"),
+        "{raw}"
+    );
+    assert!(
+        !workload_body["devices"]
+            .as_object()
+            .unwrap()
+            .values()
+            .any(|d| d["type"] == "nic")
+    );
+    assert!(raw.contains("lxc.sysctl.net.ipv4.ip_unprivileged_port_start = 0"));
+    assert!(
+        raw.contains("lxc.mount.entry = tmpfs run/openshell-supervisor-ca/material tmpfs rw,noexec,nosuid,nodev,size=1m,uid=1000,gid=1000,mode=0755,create=dir 0 0"),
+        "{raw}"
+    );
+    assert_eq!(workload.config["limits.processes"], "2048");
     assert!(
         !workload
             .config
@@ -627,7 +661,7 @@ async fn provisions_a_workload_and_supervisor_pair() {
     );
     // The control mount belongs to the workload identity.
     let control = state
-        .file("openshell-sbx-1", "/.openshell/channel/control")
+        .file("openshell-sbx-1", "/.openshell/channel/shared/control")
         .unwrap();
     assert_eq!(
         (
@@ -649,10 +683,21 @@ async fn provisions_a_workload_and_supervisor_pair() {
     assert!(
         raw.contains("--backend-descriptor-file=/.openshell/supervisor/runtime-descriptor.json")
     );
+    // A static address on lxdbr0, reserved on the NIC and set by liblxc.
+    let nic = &supervisor_body["devices"]["eth0"];
+    assert_eq!(nic["network"], "lxdbr0");
+    let address = nic["ipv4.address"].as_str().unwrap();
+    assert!(address.starts_with("10.0.3.") && !["10.0.3.1", "10.0.3.50"].contains(&address));
     assert!(
-        raw.contains("lxc.net.0.type = none"),
-        "host network by default: {raw}"
+        raw.contains(&format!("lxc.net.0.ipv4.address = {address}/24"))
+            && raw.contains("lxc.net.0.ipv4.gateway = 10.0.3.1")
+            && !raw.contains("lxc.net.0.type"),
+        "bridged network by default: {raw}"
     );
+    let run = state.file("openshell-sup-sbx-1", "/run/openshell").unwrap();
+    assert_eq!((run.uid.as_str(), run.gid.as_str()), ("1000", "1000"));
+    let hosts = state.file("openshell-sup-sbx-1", "/etc/hosts").unwrap();
+    assert!(String::from_utf8_lossy(&hosts.content).contains("10.0.3.1 host.openshell.internal"));
     assert_eq!(
         supervisor.config["environment.OPENSHELL_SANDBOX_ID"],
         "sbx-1"

@@ -50,6 +50,12 @@ impl std::fmt::Display for LxdError {
 
 impl std::error::Error for LxdError {}
 
+/// The `ERROR` lines of an lxc.log, at most the last 20.
+fn lxc_errors(log: &str) -> String {
+    let errors: Vec<&str> = log.lines().filter(|l| l.contains(" ERROR ")).collect();
+    errors[errors.len().saturating_sub(20)..].join("\n")
+}
+
 pub type Result<T> = std::result::Result<T, LxdError>;
 
 type Body = BoxBody<Bytes, std::io::Error>;
@@ -180,7 +186,45 @@ impl Client {
                 None,
             )
             .await?;
-        self.wait(&metadata).await.map(drop)
+        match self.wait(&metadata).await {
+            Ok(_) => Ok(()),
+            // LXD only says forkstart failed; liblxc's reason is in the
+            // instance's lxc.log, which a cleanup would delete with it.
+            Err(LxdError::Api { status, message }) if action == "start" => {
+                let log = self.start_log(name).await;
+                Err(LxdError::Api {
+                    status,
+                    message: if log.is_empty() {
+                        message
+                    } else {
+                        format!("{message}\nlxc.log:\n{log}")
+                    },
+                })
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The error lines of an instance's last start attempt, or empty.
+    async fn start_log(&self, name: &str) -> String {
+        let url = self.scoped(&format!("/1.0/instances/{name}/logs/lxc.log"));
+        match self.raw("GET", &url, empty_body(), None).await {
+            Ok((StatusCode::OK, body)) => lxc_errors(&String::from_utf8_lossy(&body)),
+            _ => String::new(),
+        }
+    }
+
+    /// The last lines a container wrote to its console, or an empty string.
+    pub async fn console_tail(&self, name: &str, lines: usize) -> String {
+        let url = self.scoped(&format!("/1.0/instances/{name}/console"));
+        match self.raw("GET", &url, empty_body(), None).await {
+            Ok((StatusCode::OK, body)) => {
+                let log = String::from_utf8_lossy(&body);
+                let kept: Vec<&str> = log.lines().filter(|l| !l.trim().is_empty()).collect();
+                kept[kept.len().saturating_sub(lines)..].join("\n")
+            }
+            _ => String::new(),
+        }
     }
 
     pub async fn delete_instance(&self, name: &str) -> Result<()> {
@@ -278,12 +322,13 @@ impl Client {
 
     /// Creates an empty filesystem volume in `pool`. Existing is fine.
     pub async fn create_volume(&self, pool: &str, name: &str) -> Result<()> {
-        // Both instances of a sandbox mount the volume.
+        // Both instances of a sandbox mount the volume. Filesystem volumes
+        // may be attached to several instances as they are; LXD rejects
+        // `security.shared` on them (it is for block volumes).
         let body = json!({
             "name": name,
             "type": "custom",
             "content_type": "filesystem",
-            "config": { "security.shared": "true" },
         });
         match self
             .send(
@@ -318,12 +363,35 @@ impl Client {
     /// The managed network's IPv4 address (the host side of a bridge), for
     /// example `10.12.34.1`.
     pub async fn network_ipv4(&self, network: &str) -> Result<Option<String>> {
+        Ok(self
+            .network_ipv4_cidr(network)
+            .await?
+            .map(|(address, _)| address.to_string()))
+    }
+
+    /// The managed network's IPv4 address and prefix length, from its
+    /// `ipv4.address` (for example `10.12.34.1/24`).
+    pub async fn network_ipv4_cidr(
+        &self,
+        network: &str,
+    ) -> Result<Option<(std::net::Ipv4Addr, u8)>> {
         let metadata = self.get(&format!("/1.0/networks/{network}")).await?;
         Ok(metadata["config"]["ipv4.address"]
             .as_str()
-            .and_then(|cidr| cidr.split('/').next())
-            .filter(|ip| ip.parse::<std::net::Ipv4Addr>().is_ok())
-            .map(str::to_owned))
+            .and_then(|cidr| cidr.split_once('/'))
+            .and_then(|(ip, prefix)| Some((ip.parse().ok()?, prefix.parse().ok()?)))
+            .filter(|&(_, prefix): &(_, u8)| prefix <= 32))
+    }
+
+    /// IPv4 addresses the managed network has handed out or reserved.
+    pub async fn network_leases(&self, network: &str) -> Result<Vec<std::net::Ipv4Addr>> {
+        let leases = self.get(&format!("/1.0/networks/{network}/leases")).await?;
+        Ok(leases
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|lease| lease["address"].as_str()?.parse().ok())
+            .collect())
     }
 
     /// Returns the fingerprint behind an image alias, if the alias exists.
@@ -606,6 +674,19 @@ fn percent_encode(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keeps_only_lxc_error_lines() {
+        let log = "lxc c 20261022 INFO     conf - started\n\
+                   lxc c 20261022 ERROR    conf - Failed to mount sysfs\n\
+                   lxc c 20261022 WARN     start - something\n\
+                   lxc c 20261022 ERROR    start - Failed to setup container";
+        assert_eq!(
+            lxc_errors(log),
+            "lxc c 20261022 ERROR    conf - Failed to mount sysfs\n\
+             lxc c 20261022 ERROR    start - Failed to setup container"
+        );
+    }
 
     #[test]
     fn parses_instance_lifecycle_events() {

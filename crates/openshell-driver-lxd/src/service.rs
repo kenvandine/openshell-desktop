@@ -199,7 +199,11 @@ impl ComputeDriver for Service {
             .into_inner()
             .sandbox
             .ok_or_else(|| Status::invalid_argument("sandbox is required"))?;
-        self.driver.create(&sandbox).await?;
+        if let Err(error) = self.driver.create(&sandbox).await {
+            // The gateway reports only the status code, so say why here.
+            warn!(sandbox_id = %sandbox.id, %error, "sandbox create failed");
+            return Err(error.into());
+        }
         Ok(Response::new(CreateSandboxResponse {
             runtime_identity: String::new(),
         }))

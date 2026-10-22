@@ -2,9 +2,9 @@
 //!
 //! Talks HTTP directly to the LXD daemon, so it works from a strictly
 //! confined snap with only the `lxd` plug: no `lxc` binary is needed.
-//! Sandbox lifecycle will go through the OpenShell gateway and its LXD
-//! compute driver; this client covers health checks, the instance list and
-//! the debug console.
+//! Sandbox lifecycle goes through the OpenShell gateway and its LXD compute
+//! driver; this client covers health checks, the instance list, host folder
+//! mounts and the debug console.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -138,6 +138,51 @@ pub fn list_sandboxes(instances: &[Instance]) -> Vec<Listed<'_>> {
         .collect()
 }
 
+/// A host directory to mount into an instance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Disk {
+    pub source: String,
+    pub path: String,
+    pub readonly: bool,
+}
+
+/// The name the app gives the device that mounts something at `path`, such
+/// as `mount-sandbox-data` for `/sandbox/data`.
+pub fn mount_device_name(path: &str) -> String {
+    let mut name = String::from("mount");
+    for c in path.chars() {
+        if c.is_ascii_alphanumeric() {
+            name.push(c.to_ascii_lowercase());
+        } else if !name.ends_with('-') {
+            name.push('-');
+        }
+    }
+    name.trim_end_matches('-').to_owned()
+}
+
+/// CPU cores from `limits.cpu` (a count, or a list or range of CPUs) or the
+/// driver's `limits.cpu.allowance` quota (`200ms/100ms` is two cores).
+pub fn parse_cpu_limit(config: &HashMap<String, String>) -> Option<u32> {
+    if let Some(cpu) = config.get("limits.cpu") {
+        if let Ok(count) = cpu.trim().parse() {
+            return Some(count);
+        }
+        let mut count = 0;
+        for part in cpu.split(',') {
+            count += match part.split_once('-') {
+                Some((a, b)) => b.trim().parse::<u32>().ok()? + 1 - a.trim().parse::<u32>().ok()?,
+                None => 1,
+            };
+        }
+        return Some(count);
+    }
+    let allowance = config.get("limits.cpu.allowance")?;
+    let (quota, period) = allowance.split_once('/')?;
+    let ms = |v: &str| v.trim().strip_suffix("ms")?.parse::<f64>().ok();
+    let cores = ms(quota)? / ms(period)?;
+    (cores > 0.0).then(|| cores.ceil() as u32)
+}
+
 /// Secrets for the websockets of an interactive exec operation.
 #[derive(Debug, Clone)]
 pub struct ExecSession {
@@ -232,6 +277,57 @@ impl Client {
         Ok(socket)
     }
 
+    /// Bind-mounts a host directory into an instance as a `disk` device.
+    /// `shift` maps file ownership into the container's ID range, so an
+    /// unprivileged sandbox user can use the files it is given.
+    pub fn add_disk(&self, instance: &str, device: &str, disk: &Disk) -> Result<(), String> {
+        let body = json!({ "devices": { device: {
+            "type": "disk",
+            "source": disk.source,
+            "path": disk.path,
+            "readonly": if disk.readonly { "true" } else { "false" },
+            "shift": "true",
+        }}});
+        self.request_and_wait("PATCH", &format!("/1.0/instances/{instance}"), &body)
+    }
+
+    /// Removes a device the instance defines itself. Devices that come from a
+    /// profile are not the instance's to remove.
+    pub fn remove_device(&self, instance: &str, device: &str) -> Result<(), String> {
+        let path = format!("/1.0/instances/{instance}");
+        let mut config = self.request("GET", &path, None)?;
+        let removed = config["devices"]
+            .as_object_mut()
+            .and_then(|devices| devices.remove(device));
+        if removed.is_none() {
+            return Err(format!(
+                "{device} is not a device of {instance}; it may come from a profile"
+            ));
+        }
+        self.request_and_wait("PUT", &path, &config)
+    }
+
+    /// Sends a request that may run as a background operation, and waits for
+    /// that operation to finish.
+    fn request_and_wait(&self, method: &str, path: &str, body: &Value) -> Result<(), String> {
+        let (kind, envelope) = self.send(method, path, Some(body))?;
+        if kind != "async" {
+            return Ok(());
+        }
+        let operation = envelope["operation"]
+            .as_str()
+            .ok_or("async response has no operation")?;
+        let done = self.request("GET", &format!("{operation}/wait?timeout=30"), None)?;
+        match done["status_code"].as_i64() {
+            Some(200) => Ok(()),
+            _ => Err(done["err"]
+                .as_str()
+                .filter(|e| !e.is_empty())
+                .unwrap_or("LXD operation failed")
+                .to_owned()),
+        }
+    }
+
     fn connect(&self) -> Result<UnixStream, String> {
         let stream = UnixStream::connect(&self.socket)
             .map_err(|e| format!("{}: {e}", self.socket.display()))?;
@@ -246,6 +342,18 @@ impl Client {
 
     /// Sends one request and returns the `metadata` of LXD's response envelope.
     fn request(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value, String> {
+        let (_, envelope) = self.send(method, path, body)?;
+        Ok(envelope["metadata"].clone())
+    }
+
+    /// Sends one request and returns the response type (`sync` or `async`)
+    /// with the whole envelope; LXD errors become `Err`.
+    fn send(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<(String, Value), String> {
         let mut stream = self.connect()?;
         let body = body.map(Value::to_string).unwrap_or_default();
         let request = format!(
@@ -271,7 +379,7 @@ impl Client {
                 .as_str()
                 .unwrap_or("unknown LXD error")
                 .to_owned()),
-            _ => Ok(envelope["metadata"].clone()),
+            kind => Ok((kind.unwrap_or_default().to_owned(), envelope)),
         }
     }
 }
@@ -369,6 +477,35 @@ mod tests {
         let impostor = instance("x", "Running", &[(KEY_ROLE, "supervisor")]);
         assert_eq!(impostor.openshell_role(), None);
         assert_eq!(list_sandboxes(&[impostor]).len(), 1);
+    }
+
+    #[test]
+    fn names_mount_devices_after_their_path() {
+        assert_eq!(
+            mount_device_name("/sandbox/My Data"),
+            "mount-sandbox-my-data"
+        );
+        assert_eq!(mount_device_name("/"), "mount");
+    }
+
+    #[test]
+    fn reads_cpu_limits_in_every_form() {
+        let config = |k: &str, v: &str| HashMap::from([(k.to_owned(), v.to_owned())]);
+        assert_eq!(parse_cpu_limit(&config("limits.cpu", "4")), Some(4));
+        assert_eq!(parse_cpu_limit(&config("limits.cpu", "0-3,6")), Some(5));
+        assert_eq!(
+            parse_cpu_limit(&config("limits.cpu.allowance", "200ms/100ms")),
+            Some(2)
+        );
+        assert_eq!(
+            parse_cpu_limit(&config("limits.cpu.allowance", "50ms/100ms")),
+            Some(1)
+        );
+        assert_eq!(
+            parse_cpu_limit(&config("limits.cpu.allowance", "50%")),
+            None
+        );
+        assert_eq!(parse_cpu_limit(&HashMap::new()), None);
     }
 
     #[test]

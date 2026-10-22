@@ -7,10 +7,12 @@ agent sandboxes, running on local LXD or a MicroCloud cluster.
 
 > **Status:** early prototype. With the bundled gateway and LXD driver running
 > (see [Running](#running)) the app lists, creates, starts, stops and deletes
-> sandboxes through the OpenShell gateway, shows each sandbox's network policy,
-> and lets you approve or reject the policy advisor's proposals, with a desktop
-> notification when a sandbox is blocked. Without the gateway it falls back to
-> LXD instances or sample data. Not yet verified on real hardware.
+> sandboxes through the OpenShell gateway (with CPU, memory and GPU limits),
+> shows each sandbox's whole policy and edits its network rules, mounts host
+> folders into the workspace through LXD, and lets you approve or reject the
+> policy advisor's proposals, also from the desktop notification raised when a
+> sandbox is blocked. Without the gateway it lists LXD instances read-only.
+> Not yet verified on real hardware.
 
 - [Product & technical spec](docs/SPEC.md)
 - [Compute driver research](docs/compute-driver-research.md): why we need an
@@ -70,8 +72,10 @@ systemctl --user enable --now snap.openshell-desktop.lxd-driver.service \
   snap.openshell-desktop.gateway.service
 ```
 
-The gateway listens on `127.0.0.1:17671` (`snap set openshell-desktop
-gateway-port=…` to change it; OpenShell's own snap uses 17670). See
+The gateway listens on port 17671 (`snap set openshell-desktop
+gateway-port=…` to change it; OpenShell's own snap uses 17670). It accepts
+connections on every interface, because sandbox supervisors reach it over
+`lxdbr0`; clients still need its mTLS certificate. See
 [docs/lxd-driver.md](docs/lxd-driver.md#bundled-gateway-snap).
 
 ## Layout
@@ -82,10 +86,13 @@ gateway-port=…` to change it; OpenShell's own snap uses 17670). See
 | `src/ui/window.rs` | `AdwApplicationWindow` subclass bound to the template; state, actions, status pill |
 | `src/ui/sidebar.rs` | Sandbox list |
 | `src/ui/detail.rs` | Sandbox detail `AdwPreferencesPage` (status, Policy Advisor, mounts, network, resources) |
+| `src/ui/policy.rs` | Policy Rules dialog: the full sandbox policy, network rules editable |
+| `src/ui/dialogs.rs` | New sandbox, add network rule and mount host folder forms |
+| `src/ui/preferences.rs` | Preferences dialog; `src/settings.rs` stores its settings in a key file |
 | `src/ui/console.rs` | Debug console window |
 | `src/terminal/` | libghostty-vt bindings, safe wrapper and the GTK terminal widget |
 | `src/gateway.rs` | Background thread that polls the gateway and runs commands for the UI |
-| `src/model.rs` | View-model types; gateway sandboxes enriched with LXD details, or LXD/sample data |
+| `src/model.rs` | View-model types; gateway sandboxes enriched with LXD details, or LXD instances alone |
 | `crates/openshell-gateway-client` | mTLS client for the gateway API: sandboxes, policy, advisor proposals |
 | `crates/openshell-driver-lxd` | OpenShell compute driver: gRPC on a Unix socket for the gateway, sandboxes as LXD containers, OCI → LXD image import |
 | `crates/openshell-lxd` | GTK-free LXD REST client and exec console bridge (reusable by the LXD compute driver) |

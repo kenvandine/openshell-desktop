@@ -1,10 +1,10 @@
 //! View-model types for sandboxes and their policies.
 //!
-//! Sandboxes come from live LXD instances when LXD is reachable, otherwise
-//! from sample data, until the app talks to the OpenShell gateway.
+//! Sandboxes come from the OpenShell gateway, enriched with LXD details. While
+//! the gateway is unreachable the app lists LXD instances directly.
 
-use openshell_gateway_client::{Proposal, Snapshot, State};
-use openshell_lxd::{Listed, parse_memory_mb};
+use openshell_gateway_client::{PolicyView, Proposal, Snapshot, State};
+use openshell_lxd::{Listed, parse_cpu_limit, parse_memory_mb};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxState {
@@ -18,7 +18,6 @@ pub enum SandboxState {
 pub enum Access {
     ReadWrite,
     ReadOnly,
-    Hidden,
 }
 
 impl Access {
@@ -26,20 +25,24 @@ impl Access {
         match self {
             Access::ReadWrite => "RW",
             Access::ReadOnly => "RO",
-            Access::Hidden => "Hidden",
         }
     }
 }
 
+/// A host directory bind-mounted into the sandbox by an LXD disk device.
 #[derive(Debug, Clone)]
 pub struct Mount {
+    /// The LXD device, which removing the mount deletes.
+    pub device: String,
     pub host: String,
     pub sandbox: String,
     pub access: Access,
 }
 
+/// An allowed egress endpoint and the policy rule that allows it.
 #[derive(Debug, Clone)]
 pub struct NetworkRule {
+    pub rule: String,
     pub host: String,
     pub port: u16,
 }
@@ -52,7 +55,7 @@ pub struct AdvisorPrompt {
     pub host: String,
     pub port: u16,
     pub binary: String,
-    /// Gateway draft chunk and the token to approve it with; empty for samples.
+    /// Gateway draft chunk and the token to approve it with.
     pub chunk_id: String,
     pub review_token: String,
 }
@@ -79,8 +82,10 @@ pub struct Sandbox {
     pub runtime: String,
     pub profile: String,
     pub state: SandboxState,
-    /// The gateway's phase for this sandbox, empty for sample and LXD-only data.
+    /// The gateway's phase for this sandbox, empty for LXD-only data.
     pub phase: String,
+    /// Why the gateway says it is not ready, if it says.
+    pub status_detail: String,
     /// "Container" or "Virtual Machine".
     pub instance_type: String,
     pub uptime_mins: Option<u32>,
@@ -91,6 +96,8 @@ pub struct Sandbox {
     pub mounts: Vec<Mount>,
     pub rules: Vec<NetworkRule>,
     pub prompts: Vec<AdvisorPrompt>,
+    /// The gateway's policy; `None` for LXD-only data or while provisioning.
+    pub policy: Option<PolicyView>,
 }
 
 impl Sandbox {
@@ -111,12 +118,16 @@ impl Sandbox {
     pub fn from_listed(listed: &Listed) -> Self {
         let instance = listed.instance;
         let config = |key: &str| instance.expanded_config.get(key).map(String::as_str);
-        let mounts = instance
+        // Host folders only: the root disk has no source, and the driver's
+        // shared volume is a storage volume, not a host path.
+        let mut mounts: Vec<Mount> = instance
             .expanded_devices
-            .values()
-            .filter(|d| d.get("type").map(String::as_str) == Some("disk"))
-            .filter_map(|d| {
+            .iter()
+            .filter(|(_, d)| d.get("type").map(String::as_str) == Some("disk"))
+            .filter(|(_, d)| d.get("source").is_some_and(|s| s.starts_with('/')))
+            .filter_map(|(device, d)| {
                 Some(Mount {
+                    device: device.clone(),
                     host: d.get("source")?.clone(),
                     sandbox: d.get("path")?.clone(),
                     access: if d.get("readonly").map(String::as_str) == Some("true") {
@@ -127,6 +138,7 @@ impl Sandbox {
                 })
             })
             .collect();
+        mounts.sort_by(|a, b| a.sandbox.cmp(&b.sandbox));
 
         Sandbox {
             name: instance
@@ -147,6 +159,7 @@ impl Sandbox {
                 SandboxState::Stopped
             },
             phase: String::new(),
+            status_detail: String::new(),
             instance_type: if instance.kind == "virtual-machine" {
                 "Virtual Machine"
             } else {
@@ -162,9 +175,7 @@ impl Sandbox {
             memory_limit_mb: config("limits.memory")
                 .and_then(parse_memory_mb)
                 .unwrap_or(0),
-            cpu_limit: config("limits.cpu")
-                .and_then(|c| c.parse().ok())
-                .unwrap_or(0),
+            cpu_limit: parse_cpu_limit(&instance.expanded_config).unwrap_or(0),
             gpu_passthrough: instance
                 .expanded_devices
                 .values()
@@ -172,6 +183,7 @@ impl Sandbox {
             mounts,
             rules: vec![],
             prompts: vec![],
+            policy: None,
         }
     }
 }
@@ -188,6 +200,7 @@ impl Sandbox {
             profile: info.image.clone(),
             state: SandboxState::Stopped,
             phase: String::new(),
+            status_detail: String::new(),
             instance_type: "Container".into(),
             uptime_mins: None,
             memory_used_mb: 0,
@@ -197,6 +210,7 @@ impl Sandbox {
             mounts: vec![],
             rules: vec![],
             prompts: vec![],
+            policy: None,
         });
         sandbox.name = info.name.clone();
         sandbox.state = match info.state {
@@ -205,14 +219,18 @@ impl Sandbox {
             State::Transitioning | State::Failed => SandboxState::Busy,
         };
         sandbox.phase = info.phase.clone();
+        sandbox.status_detail = info.detail.clone();
         sandbox.rules = snapshot
-            .allowed
+            .policy
             .iter()
-            .map(|e| NetworkRule {
+            .flat_map(PolicyView::endpoints)
+            .map(|(rule, e)| NetworkRule {
+                rule: rule.to_owned(),
                 host: e.host.clone(),
                 port: e.port,
             })
             .collect();
+        sandbox.policy = snapshot.policy.clone();
         sandbox.prompts = snapshot
             .proposals
             .iter()
@@ -236,102 +254,4 @@ pub fn format_mb(mb: u32) -> String {
     } else {
         format!("{mb} MB")
     }
-}
-
-fn system_mounts() -> Mount {
-    Mount {
-        host: "/etc, /usr, /lib".into(),
-        sandbox: "System".into(),
-        access: Access::ReadOnly,
-    }
-}
-
-fn rule(host: &str, port: u16) -> NetworkRule {
-    NetworkRule {
-        host: host.into(),
-        port,
-    }
-}
-
-pub fn sample_sandboxes() -> Vec<Sandbox> {
-    vec![
-        Sandbox {
-            name: "code-eval-01".into(),
-            instance: "code-eval-01".into(),
-            runtime: "Python".into(),
-            profile: "Code Assistant".into(),
-            state: SandboxState::Running,
-            phase: String::new(),
-            instance_type: "Container".into(),
-            uptime_mins: Some(24),
-            memory_used_mb: 840,
-            memory_limit_mb: 4096,
-            cpu_limit: 4,
-            gpu_passthrough: false,
-            mounts: vec![
-                Mount {
-                    host: "~/Projects/web-app".into(),
-                    sandbox: "/workspace".into(),
-                    access: Access::ReadWrite,
-                },
-                system_mounts(),
-            ],
-            rules: vec![rule("api.openai.com", 443), rule("huggingface.co", 443)],
-            prompts: vec![AdvisorPrompt {
-                method: "GET".into(),
-                url: "https://registry.npmjs.org".into(),
-                host: "registry.npmjs.org".into(),
-                port: 443,
-                binary: "/usr/bin/npm".into(),
-                chunk_id: String::new(),
-                review_token: String::new(),
-            }],
-        },
-        Sandbox {
-            name: "data-scraper".into(),
-            instance: "data-scraper".into(),
-            runtime: "Node".into(),
-            profile: "Web Researcher".into(),
-            state: SandboxState::Stopped,
-            phase: String::new(),
-            instance_type: "Container".into(),
-            uptime_mins: None,
-            memory_used_mb: 0,
-            memory_limit_mb: 2048,
-            cpu_limit: 2,
-            gpu_passthrough: false,
-            mounts: vec![system_mounts()],
-            rules: vec![rule("*", 443), rule("*", 80)],
-            prompts: vec![],
-        },
-        Sandbox {
-            name: "doc-indexer".into(),
-            instance: "doc-indexer".into(),
-            runtime: "Rust".into(),
-            profile: "Fully Offline".into(),
-            state: SandboxState::Running,
-            phase: String::new(),
-            instance_type: "Container".into(),
-            uptime_mins: Some(132),
-            memory_used_mb: 512,
-            memory_limit_mb: 8192,
-            cpu_limit: 8,
-            gpu_passthrough: true,
-            mounts: vec![
-                Mount {
-                    host: "~/Documents/corpus".into(),
-                    sandbox: "/data".into(),
-                    access: Access::ReadOnly,
-                },
-                Mount {
-                    host: "~/.ssh".into(),
-                    sandbox: "/root/.ssh".into(),
-                    access: Access::Hidden,
-                },
-                system_mounts(),
-            ],
-            rules: vec![],
-            prompts: vec![],
-        },
-    ]
 }

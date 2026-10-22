@@ -2754,6 +2754,7 @@ name = "openshell-gateway-client"
 version = "0.1.0"
 dependencies = [
  "openshell-core",
+ "prost-types",
  "thiserror",
  "tonic",
 ]

@@ -25,7 +25,7 @@ socket_path = "/run/openshell/lxd.sock"
 
 ```sh
 openshell-driver-lxd --socket /run/openshell/lxd.sock \
-  --grpc-endpoint https://127.0.0.1:17671 --tls-ca /path/to/gateway-ca.crt
+  --grpc-endpoint https://host.openshell.internal:17671 --tls-ca /path/to/gateway-ca.crt
 ```
 
 Flags worth knowing (all have `OPENSHELL_*` environment equivalents):
@@ -36,8 +36,9 @@ Flags worth knowing (all have `OPENSHELL_*` environment equivalents):
 | `--tls-ca` | Gateway CA the supervisor trusts. |
 | `--sandbox-runtime-image` | OCI image shipping `/openshell-sandbox` (default: OpenShell's published image for the pinned version). |
 | `--supervisor-image` | OCI image shipping `/openshell-supervisor`. |
-| `--supervisor-network` | Run the supervisor on an LXD managed network instead of the host network namespace. |
-| `--host-gateway-ip` | Address the supervisor uses for the host (default loopback, or the bridge address). |
+| `--supervisor-network` | LXD managed network the supervisor joins (default `lxdbr0`), or `host` for the host network namespace, which only privileged containers can use. |
+| `--host-gateway-ip` | Address the supervisor uses for the host (default the bridge address, or loopback with `host`). |
+| `--resolv-conf` | File copied to the supervisor as `/etc/resolv.conf` (default: the bridge's DNS server). |
 | `--project`, `--storage-pool`, `--gpu`, `--nvidia-runtime` | LXD placement and GPU passthrough. |
 
 ## Bundled gateway (snap)
@@ -56,6 +57,13 @@ systemctl --user enable --now snap.openshell-desktop.lxd-driver snap.openshell-d
 the gateway with `--compute-driver lxd --compute-driver-socket
 $XDG_RUNTIME_DIR/lxd-driver.sock`. The driver's `--tls-ca` defaults to that CA.
 The desktop app reads the same TLS directory as its gateway client.
+
+Supervisors dial the gateway over `lxdbr0` as `host.openshell.internal` (a name
+in the gateway's certificate), so the gateway listens on `0.0.0.0` by default.
+Clients still need the mTLS client certificate and supervisors their sandbox
+token. If a host firewall filters input on `lxdbr0`, allow the gateway port
+there. `snap set openshell-desktop gateway-bind-address=127.0.0.1` restricts
+it to loopback, which only works with `supervisor-network=host`.
 
 ## How LXD runs OpenShell's OCI images
 
@@ -95,19 +103,31 @@ OpenShell isolates a sandbox with two containers, and so does this driver.
 | Instance | Name | Runs | Network |
 |---|---|---|---|
 | workload | `openshell-<id>` | `/opt/openshell/bin/openshell-sandbox --bootstrap …` as init, under the resolved non-root identity; it launches the agent only after the supervisor authenticates | none (no profiles, no NIC) |
-| supervisor | `openshell-sup-<id>` | `/openshell-supervisor`: gateway session, policy engine, egress proxy | host network namespace (`lxc.net.0.type = none`), or a bridged NIC with `--supervisor-network` |
+| supervisor | `openshell-sup-<id>` | `/openshell-supervisor`: gateway session, policy engine, egress proxy | a NIC on `lxdbr0` with a static address (see [Supervisor network](#supervisor-network)), or the host network namespace with `--supervisor-network host` |
 
 They share one custom storage volume (`openshell-control-<id>`, mounted at
-`/.openshell/channel/control` in both) that holds the runtime-initiated control
+`/.openshell/channel/shared` in both) whose `control` directory holds the runtime-initiated control
 socket. The supervisor binds it, the workload runtime dials it with retry, and
 the connection is mutually authenticated with per-sandbox mTLS material.
+
+### Supervisor network
+
+An unprivileged LXD container cannot share the host's network namespace:
+liblxc fails to mount sysfs and the start fails. The supervisor therefore gets
+its own NIC on `lxdbr0`. Its OCI image has no DHCP client, so the driver picks
+a free address in the bridge's subnet (skipping the gateway and the network's
+leases), reserves it with the NIC's `ipv4.address`, and has liblxc configure
+it before init with `lxc.net.0.ipv4.address` and `lxc.net.0.ipv4.gateway` in
+`raw.lxc`. DNS goes to the bridge's dnsmasq, and outbound traffic through the
+bridge's NAT.
 
 ### Create
 
 1. Validate the request; decode `launch_authentication` (required).
 2. Pull the supervisor image and the workload image into LXD (see above), and
    extract `/openshell-sandbox` from the runtime image (cached by digest).
-3. Create the control volume (`security.shared=true`) and the workload
+3. Create the control volume (a filesystem volume, which both instances can
+   attach) and the workload
    instance, stopped. Read `/etc/passwd` and `/etc/group` through the file API,
    refuse images that pre-populate `/.openshell`, and resolve the workload
    identity against the image's own accounts. Images with no `USER` get
@@ -117,8 +137,9 @@ the connection is mutually authenticated with per-sandbox mTLS material.
    - workload: the runtime binary, `bootstrap.json` and the mTLS server key and
      certificate (identity-owned, 0600);
    - supervisor: `runtime-descriptor.json`, `auth.json`, a restart copy of the
-     identity and child environment, the gateway CA, `/etc/resolv.conf`, and
-     the sandbox token if the gateway sent one.
+     identity and child environment, the gateway CA, `/etc/resolv.conf`,
+     `/etc/hosts` (mapping `host.openshell.internal` to the host), and the
+     sandbox token if the gateway sent one.
 
    The workload never receives supervisor credentials, and the supervisor never
    receives the workload's private key.
@@ -149,7 +170,14 @@ Any failure removes both instances and the volume.
 ### Per-instance settings
 
 - **Init**: `raw.lxc` sets `lxc.init.cmd`, `lxc.init.uid`/`gid`/`groups`,
-  `lxc.init.cwd` and `lxc.no_new_privs = 1`. Unprivileged, nesting off.
+  `lxc.init.cwd`, `lxc.no_new_privs = 1` and `lxc.cap.keep = none` (an empty
+  bounding set, which the runtime checks). Unprivileged, nesting off. The
+  workload also gets `lxc.net.0.type = empty` with `flags = up` (loopback up,
+  no NIC; the runtime's socket mediation needs loopback) and
+  `lxc.sysctl.net.ipv4.ip_unprivileged_port_start = 0` for its DNS relay on
+  127.0.0.53:53, a 1 MiB tmpfs owned by the workload identity at
+  `/run/openshell-supervisor-ca/material` (where the runtime installs the
+  supervisor's CA), and `limits.processes = 2048`.
 - **Environment**: OpenShell's supervisor variables go on the supervisor
   (`OPENSHELL_SANDBOX_ID`, `OPENSHELL_ENDPOINT`, the main-process spec, the
   user environment as JSON, …). The agent's environment (image `ENV`, template,
@@ -170,11 +198,6 @@ This has been exercised against a fake LXD in the test suite, not against a real
 LXD, a real gateway, or OpenShell's published images. These are the assumptions
 to check first:
 
-- **Host network for the supervisor.** `lxc.net.0.type = none` in `raw.lxc` is
-  meant to share the host's network namespace (what Podman's `netns host` does).
-  If LXD's AppArmor profile or liblxc refuses it, use `--supervisor-network
-  lxdbr0`; that needs a supervisor image that brings its own interface up, since
-  LXD only configures networking through the guest.
 - **Nested sandboxing.** The runtime uses Landlock and a seccomp notification
   broker inside an unprivileged LXD container. LXD's seccomp and AppArmor
   profiles may block parts of that; `security.syscalls.intercept.*` or a

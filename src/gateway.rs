@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use openshell_gateway_client::{Config, Error, Gateway, Proposal, Snapshot};
+use openshell_gateway_client::{Config, CreateOptions, Error, Gateway, Proposal, Snapshot};
 
 const POLL: Duration = Duration::from_secs(3);
 
@@ -15,7 +15,7 @@ pub enum Command {
     Refresh,
     Create {
         name: String,
-        image: String,
+        options: CreateOptions,
     },
     Start(String),
     Stop(String),
@@ -29,6 +29,43 @@ pub enum Command {
         sandbox: String,
         chunk_id: String,
     },
+    /// Allow `host:port`, for one executable or (with `None`) any.
+    AddRule {
+        sandbox: String,
+        host: String,
+        port: u16,
+        binary: Option<String>,
+    },
+    RemoveEndpoint {
+        sandbox: String,
+        rule: String,
+        host: String,
+        port: u16,
+    },
+    RemoveRule {
+        sandbox: String,
+        rule: String,
+    },
+}
+
+impl Command {
+    /// What the command does, for "… failed" messages; `None` for polling.
+    fn describe(&self) -> Option<String> {
+        Some(match self {
+            Command::Refresh => return None,
+            Command::Create { name, .. } => format!("Creating {name}"),
+            Command::Start(name) => format!("Starting {name}"),
+            Command::Stop(name) => format!("Stopping {name}"),
+            Command::Delete(name) => format!("Deleting {name}"),
+            Command::Approve { proposal, .. } => {
+                format!("Allowing {}:{}", proposal.host, proposal.port)
+            }
+            Command::Reject { .. } => "Ignoring the request".to_owned(),
+            Command::AddRule { host, port, .. } => format!("Allowing {host}:{port}"),
+            Command::RemoveEndpoint { host, port, .. } => format!("Removing {host}:{port}"),
+            Command::RemoveRule { rule, .. } => format!("Removing rule {rule}"),
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +78,8 @@ pub enum Event {
     Done(String),
     /// A command failed.
     Failed(String),
+    /// Whether new sandboxes can ask for a GPU; sent on each connect.
+    GpuSupported(bool),
 }
 
 pub struct Handle {
@@ -82,7 +121,14 @@ async fn run(commands: async_channel::Receiver<Command>, events: async_channel::
 
         if gateway.is_none() {
             match Gateway::connect(&config).await {
-                Ok(connected) => gateway = Some(connected),
+                Ok(mut connected) => {
+                    // Older gateways may not answer; offer no GPU then.
+                    let gpu = connected.gpu_supported().await.unwrap_or(false);
+                    if events.send(Event::GpuSupported(gpu)).await.is_err() {
+                        return;
+                    }
+                    gateway = Some(connected);
+                }
                 Err(error) => {
                     if events
                         .send(Event::Unavailable(error.to_string()))
@@ -96,6 +142,7 @@ async fn run(commands: async_channel::Receiver<Command>, events: async_channel::
             }
         }
         let client = gateway.as_mut().expect("connected above");
+        let action = command.describe();
         let sent = match execute(client, command).await {
             Ok(outcome) => {
                 let mut sent = Vec::new();
@@ -109,7 +156,25 @@ async fn run(commands: async_channel::Receiver<Command>, events: async_channel::
                 }
                 sent
             }
-            Err(error) => vec![failure(&mut gateway, error)],
+            Err(error) => {
+                let event = failure(&mut gateway, error);
+                // Say which command failed, even when the connection is what broke.
+                let reason = match &event {
+                    Event::Failed(reason) | Event::Unavailable(reason) => reason.clone(),
+                    _ => String::new(),
+                };
+                match action {
+                    None => vec![event],
+                    Some(action) => {
+                        let failed = Event::Failed(format!("{action} failed: {reason}"));
+                        if matches!(event, Event::Unavailable(_)) {
+                            vec![failed, event]
+                        } else {
+                            vec![failed]
+                        }
+                    }
+                }
+            }
         };
         for event in sent {
             if events.send(event).await.is_err() {
@@ -124,7 +189,12 @@ async fn run(commands: async_channel::Receiver<Command>, events: async_channel::
 fn failure(gateway: &mut Option<Gateway>, error: Error) -> Event {
     match error {
         Error::Rpc(status) if !is_connection_error(&status) => {
-            Event::Failed(status.message().into())
+            // The gateway sometimes sends only a code, such as INTERNAL.
+            Event::Failed(if status.message().is_empty() {
+                status.code().description().to_owned()
+            } else {
+                status.message().to_owned()
+            })
         }
         other => {
             *gateway = None;
@@ -149,9 +219,9 @@ struct Outcome {
 async fn execute(gateway: &mut Gateway, command: Command) -> Result<Outcome, Error> {
     let message = match command {
         Command::Refresh => None,
-        Command::Create { name, image } => {
-            gateway.create(&name, &image).await?;
-            Some(format!("Creating {name}"))
+        Command::Create { name, options } => {
+            gateway.create(&name, &options).await?;
+            Some(format!("Created {name}"))
         }
         Command::Start(name) => {
             gateway.start(&name).await?;
@@ -172,6 +242,32 @@ async fn execute(gateway: &mut Gateway, command: Command) -> Result<Outcome, Err
         Command::Reject { sandbox, chunk_id } => {
             gateway.reject(&sandbox, &chunk_id).await?;
             None
+        }
+        Command::AddRule {
+            sandbox,
+            host,
+            port,
+            binary,
+        } => {
+            let version = gateway
+                .add_rule(&sandbox, &host, port, binary.as_deref())
+                .await?;
+            Some(format!("Allowed {host}:{port} (policy version {version})"))
+        }
+        Command::RemoveEndpoint {
+            sandbox,
+            rule,
+            host,
+            port,
+        } => {
+            let version = gateway
+                .remove_endpoint(&sandbox, &rule, &host, port)
+                .await?;
+            Some(format!("Removed {host}:{port} (policy version {version})"))
+        }
+        Command::RemoveRule { sandbox, rule } => {
+            let version = gateway.remove_rule(&sandbox, &rule).await?;
+            Some(format!("Removed rule {rule} (policy version {version})"))
         }
     };
     Ok(Outcome { message })
