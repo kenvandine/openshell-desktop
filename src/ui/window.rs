@@ -188,6 +188,18 @@ impl Window {
             Event::Failed(message) => {
                 let toast = adw::Toast::new(&message);
                 toast.set_timeout(0);
+                // Long errors are cut off in a toast; Details shows them whole.
+                toast.set_button_label(Some("Details"));
+                toast.connect_button_clicked(glib::clone!(
+                    #[weak(rename_to = win)]
+                    self,
+                    move |_| {
+                        let dialog =
+                            adw::AlertDialog::new(Some("Something Went Wrong"), Some(&message));
+                        dialog.add_response("close", "Close");
+                        dialog.present(Some(&win));
+                    }
+                ));
                 self.show_toast(toast);
             }
             Event::GpuSupported(gpu) => imp.gpu_supported.set(gpu),
