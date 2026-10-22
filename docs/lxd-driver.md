@@ -17,7 +17,7 @@ plug.
 ```toml
 # gateway.toml
 [openshell.gateway]
-compute_drivers = ["lxd"]
+compute_driver = "lxd"
 
 [openshell.drivers.lxd]
 socket_path = "/run/openshell/lxd.sock"
@@ -25,7 +25,7 @@ socket_path = "/run/openshell/lxd.sock"
 
 ```sh
 openshell-driver-lxd --socket /run/openshell/lxd.sock \
-  --grpc-endpoint https://127.0.0.1:17670 --tls-ca /path/to/gateway-ca.crt
+  --grpc-endpoint https://127.0.0.1:17671 --tls-ca /path/to/gateway-ca.crt
 ```
 
 Flags worth knowing (all have `OPENSHELL_*` environment equivalents):
@@ -39,6 +39,23 @@ Flags worth knowing (all have `OPENSHELL_*` environment equivalents):
 | `--supervisor-network` | Run the supervisor on an LXD managed network instead of the host network namespace. |
 | `--host-gateway-ip` | Address the supervisor uses for the host (default loopback, or the bridge address). |
 | `--project`, `--storage-pool`, `--gpu`, `--nvidia-runtime` | LXD placement and GPU passthrough. |
+
+## Bundled gateway (snap)
+
+The snap ships `openshell-gateway` next to the driver, because a confined
+`openshell` CLI/gateway cannot reach this snap's driver socket. Both run as
+user-scope services:
+
+```sh
+snap set openshell-desktop gateway-port=17671   # optional, 17671 avoids OpenShell's own snap on 17670
+systemctl --user enable --now snap.openshell-desktop.lxd-driver snap.openshell-desktop.gateway
+```
+
+`gateway-wrapper` generates mTLS material in `$SNAP_USER_COMMON/gateway/tls`
+(`ca.crt`, `client/tls.{crt,key}`), stores state in SQLite beside it and starts
+the gateway with `--compute-driver lxd --compute-driver-socket
+$XDG_RUNTIME_DIR/lxd-driver.sock`. The driver's `--tls-ca` defaults to that CA.
+The desktop app reads the same TLS directory as its gateway client.
 
 ## How LXD runs OpenShell's OCI images
 

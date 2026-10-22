@@ -5,22 +5,15 @@ description: |
   OpenShell Desktop configures, launches and monitors NVIDIA OpenShell agent
   sandboxes running in local LXD containers or on a MicroCloud cluster.
 
-  The snap ships the desktop app and `openshell-driver-lxd`, the OpenShell
-  compute driver that runs sandboxes as LXD containers. Both talk to LXD over
-  its REST socket, so connect the `lxd` interface:
+  The snap ships the desktop app, an OpenShell gateway, and
+  `openshell-driver-lxd`, the compute driver that runs sandboxes as LXD
+  containers. Connect the `lxd` interface, then enable the per-user services
+  (the gateway listens on 127.0.0.1:17671, next to the OpenShell snap's
+  17670, so enable it for one user only):
 
     sudo snap connect openshell-desktop:lxd lxd:lxd
-
-  The driver daemon is disabled by default while it is in development. Start
-  it with:
-
-    sudo snap start --enable openshell-desktop.lxd-driver
-
-  and point an OpenShell gateway at its socket,
-  /var/snap/openshell-desktop/common/lxd-driver.sock. Tell the driver where
-  the gateway's gRPC endpoint is (sandbox supervisors dial it):
-
-    sudo snap set openshell-desktop grpc-endpoint=https://127.0.0.1:17670
+    systemctl --user enable --now snap.openshell-desktop.lxd-driver.service \
+      snap.openshell-desktop.gateway.service
 adopt-info: openshell-desktop
 license: Apache-2.0
 base: core24
@@ -29,6 +22,11 @@ confinement: strict
 platforms:
   amd64:
   arm64:
+
+environment:
+  # Where the bundled gateway writes its client certificates; the app reads
+  # the same directory.
+  OPENSHELL_LOCAL_TLS_DIR: $SNAP_USER_COMMON/gateway/tls
 
 slots:
   # GApplication owns its application ID on the session bus; strict snaps
@@ -53,10 +51,31 @@ apps:
     slots:
       - dbus-openshell-desktop
 
+  # The gateway and driver run as the logged-in user: the app reads the
+  # gateway's TLS bundle from $SNAP_USER_COMMON, and the driver talks to the
+  # user's LXD socket. They stay disabled until enabled for one user, since
+  # every gateway binds the same loopback port:
+  #
+  #   systemctl --user enable --now snap.openshell-desktop.lxd-driver.service \
+  #     snap.openshell-desktop.gateway.service
+  gateway:
+    command: bin/gateway-wrapper
+    daemon: simple
+    daemon-scope: user
+    install-mode: disable
+    # Do not restart on refresh: that would kill running sandbox sessions.
+    refresh-mode: endure
+    restart-condition: on-failure
+    plugs:
+      - network
+      - network-bind
+
   lxd-driver:
     command: bin/lxd-driver-wrapper
     daemon: simple
+    daemon-scope: user
     install-mode: disable
+    refresh-mode: endure
     restart-condition: on-failure
     plugs:
       - lxd
@@ -114,6 +133,15 @@ parts:
         | sh -s -- -y --no-modify-path --profile minimal --default-toolchain stable
       export PATH="$CARGO_HOME/bin:$PATH"
       cargo build --release --locked --workspace --bins
+      # The OpenShell gateway, pinned to the revision the driver builds
+      # against and without the in-tree Docker/Podman/Kubernetes drivers:
+      # sandboxes here are LXD instances behind openshell-driver-lxd.
+      cargo install --git https://github.com/NVIDIA/OpenShell \
+        --rev 39d95b42cb403d883e2f545a3861131ccd3d2ebf --locked \
+        --no-default-features --root "$CRAFT_PART_BUILD/gateway" openshell-gateway
+      install -Dm755 "$CRAFT_PART_BUILD/gateway/bin/openshell-gateway" \
+        "$CRAFT_PART_INSTALL/bin/openshell-gateway"
+      install -Dm755 snap/local/gateway-wrapper "$CRAFT_PART_INSTALL/bin/gateway-wrapper"
       install -Dm755 target/release/openshell-desktop "$CRAFT_PART_INSTALL/bin/openshell-desktop"
       install -Dm755 target/release/openshell-driver-lxd "$CRAFT_PART_INSTALL/bin/openshell-driver-lxd"
       install -Dm755 snap/local/lxd-driver-wrapper "$CRAFT_PART_INSTALL/bin/lxd-driver-wrapper"

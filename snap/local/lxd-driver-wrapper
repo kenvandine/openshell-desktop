@@ -1,19 +1,23 @@
 #!/bin/sh
-# Starts the LXD compute driver with the gateway settings from snap config:
+# Starts the LXD compute driver for the bundled gateway. Optional snap config:
 #
-#   sudo snap set openshell-desktop grpc-endpoint=https://127.0.0.1:17670
-#   sudo snap set openshell-desktop tls-ca=/path/to/ca.crt     # optional
-#   sudo snap set openshell-desktop supervisor-network=lxdbr0  # optional
+#   snap set openshell-desktop grpc-endpoint=https://127.0.0.1:17671
+#   snap set openshell-desktop tls-ca=/path/to/ca.crt
+#   snap set openshell-desktop supervisor-network=lxdbr0
 set -eu
 
 endpoint="$(snapctl get grpc-endpoint)"
 tls_ca="$(snapctl get tls-ca)"
 network="$(snapctl get supervisor-network)"
-: "${endpoint:=https://127.0.0.1:17670}"
+port="$(snapctl get gateway-port)"
+: "${port:=17671}"
+: "${endpoint:=https://127.0.0.1:$port}"
+: "${tls_ca:=$OPENSHELL_LOCAL_TLS_DIR/ca.crt}"
 
-set -- --socket "$SNAP_COMMON/lxd-driver.sock" \
-	--staging-dir "$SNAP_COMMON/staging" \
-	--grpc-endpoint "$endpoint"
-[ -z "$tls_ca" ] || set -- "$@" --tls-ca "$tls_ca"
+mkdir -p "$SNAP_USER_COMMON/staging"
+set -- --socket "$XDG_RUNTIME_DIR/lxd-driver.sock" \
+	--staging-dir "$SNAP_USER_COMMON/staging" \
+	--grpc-endpoint "$endpoint" \
+	--tls-ca "$tls_ca"
 [ -z "$network" ] || set -- "$@" --supervisor-network "$network"
 exec "$SNAP/bin/openshell-driver-lxd" "$@"
