@@ -107,7 +107,8 @@ the connection is mutually authenticated with per-sandbox mTLS material.
 1. Validate the request; decode `launch_authentication` (required).
 2. Pull the supervisor image and the workload image into LXD (see above), and
    extract `/openshell-sandbox` from the runtime image (cached by digest).
-3. Create the control volume (`security.shared=true`) and the workload
+3. Create the control volume (a filesystem volume, which both instances can
+   attach) and the workload
    instance, stopped. Read `/etc/passwd` and `/etc/group` through the file API,
    refuse images that pre-populate `/.openshell`, and resolve the workload
    identity against the image's own accounts. Images with no `USER` get

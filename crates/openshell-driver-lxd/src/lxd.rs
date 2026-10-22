@@ -278,12 +278,13 @@ impl Client {
 
     /// Creates an empty filesystem volume in `pool`. Existing is fine.
     pub async fn create_volume(&self, pool: &str, name: &str) -> Result<()> {
-        // Both instances of a sandbox mount the volume.
+        // Both instances of a sandbox mount the volume. Filesystem volumes
+        // may be attached to several instances as they are; LXD rejects
+        // `security.shared` on them (it is for block volumes).
         let body = json!({
             "name": name,
             "type": "custom",
             "content_type": "filesystem",
-            "config": { "security.shared": "true" },
         });
         match self
             .send(
