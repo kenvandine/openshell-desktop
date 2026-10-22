@@ -1,4 +1,5 @@
 pub mod accounts;
+pub mod approvals;
 pub mod console;
 pub mod detail;
 pub mod dialogs;

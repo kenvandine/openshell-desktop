@@ -5,6 +5,7 @@
 //! gateway's state. Everything here is async; the app runs it on its own
 //! runtime thread.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -14,8 +15,9 @@ use openshell_core::proto::{
     GetDraftPolicyRequest, GetSandboxConfigRequest, GpuResourceRequirements, ListSandboxesRequest,
     NetworkBinary, NetworkEndpoint, NetworkPolicyRule, PolicyChunk, PolicyMergeOperation,
     RejectDraftChunkRequest, RemoveNetworkEndpoint, RemoveNetworkRule, ResourceRequirements,
-    Sandbox, SandboxPhase, SandboxPolicy, SandboxSpec, StartSandboxRequest, StopSandboxRequest,
-    UpdateConfigRequest, open_shell_client::OpenShellClient, policy_merge_operation::Operation,
+    Sandbox, SandboxPhase, SandboxPolicy, SandboxSpec, SettingScope, SettingValue,
+    StartSandboxRequest, StopSandboxRequest, UpdateConfigRequest,
+    open_shell_client::OpenShellClient, policy_merge_operation::Operation, setting_value,
 };
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 
@@ -389,6 +391,35 @@ impl Proposal {
     }
 }
 
+/// The gateway setting that lets it approve proposals on its own.
+const APPROVAL_MODE_KEY: &str = "proposal_approval_mode";
+
+/// Whether the gateway approves a sandbox's proposals by itself. It only does
+/// so when its prover finds a proposal grants nothing new beyond the request;
+/// anything riskier still waits for the user.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AutoApprove {
+    pub enabled: bool,
+    /// Set gateway-wide, which overrides any per-sandbox choice.
+    pub gateway_wide: bool,
+}
+
+impl AutoApprove {
+    fn from_settings(settings: &HashMap<String, proto::EffectiveSetting>) -> Self {
+        let Some(setting) = settings.get(APPROVAL_MODE_KEY) else {
+            return Self::default();
+        };
+        let enabled = matches!(
+            setting.value.as_ref().and_then(|v| v.value.as_ref()),
+            Some(setting_value::Value::StringValue(mode)) if mode == "auto"
+        );
+        Self {
+            enabled,
+            gateway_wide: setting.scope == SettingScope::Global as i32,
+        }
+    }
+}
+
 /// A sandbox with its policy and pending advisor proposals.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
@@ -396,6 +427,7 @@ pub struct Snapshot {
     /// `None` while the gateway has no policy for it, such as during provisioning.
     pub policy: Option<PolicyView>,
     pub proposals: Vec<Proposal>,
+    pub auto_approve: AutoApprove,
 }
 
 #[derive(Clone)]
@@ -474,7 +506,7 @@ impl Gateway {
         let infos = self.list().await?;
         let mut snapshots = Vec::with_capacity(infos.len());
         for info in infos {
-            let policy = self
+            let config = self
                 .client
                 .get_sandbox_config(GetSandboxConfigRequest {
                     workspace_scope: workspace(),
@@ -482,8 +514,14 @@ impl Gateway {
                 })
                 .await
                 .ok()
-                .map(|r| r.into_inner())
+                .map(|r| r.into_inner());
+            let policy = config
+                .as_ref()
                 .and_then(|r| Some(PolicyView::from_proto(r.policy.as_ref()?, r.version)));
+            let auto_approve = config
+                .as_ref()
+                .map(|r| AutoApprove::from_settings(&r.settings))
+                .unwrap_or_default();
             let proposals = self
                 .client
                 .get_draft_policy(GetDraftPolicyRequest {
@@ -502,6 +540,7 @@ impl Gateway {
                 info,
                 policy,
                 proposals,
+                auto_approve,
             });
         }
         Ok(snapshots)
@@ -526,6 +565,24 @@ impl Gateway {
                 workspace_scope: workspace(),
                 chunk_id: chunk_id.into(),
                 sandbox: sandbox.into(),
+                ..Default::default()
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Lets the gateway approve `sandbox`'s low-risk proposals by itself.
+    /// The gateway cannot delete a sandbox setting, so off is "manual".
+    pub async fn set_auto_approve(&mut self, sandbox: &str, enabled: bool) -> Result<(), Error> {
+        let mode = if enabled { "auto" } else { "manual" };
+        self.client
+            .update_config(UpdateConfigRequest {
+                workspace_scope: workspace(),
+                sandbox: sandbox.into(),
+                setting_key: APPROVAL_MODE_KEY.into(),
+                setting_value: Some(SettingValue {
+                    value: Some(setting_value::Value::StringValue(mode.into())),
+                }),
                 ..Default::default()
             })
             .await?;
@@ -685,6 +742,45 @@ mod tests {
     use super::*;
     use openshell_core::proto::datamodel::v1::ObjectMeta;
     use openshell_core::proto::{SandboxStatus, SandboxTemplate};
+
+    #[test]
+    fn auto_approve_reads_the_effective_setting() {
+        let setting = |mode: &str, scope: SettingScope| {
+            HashMap::from([(
+                APPROVAL_MODE_KEY.to_owned(),
+                proto::EffectiveSetting {
+                    value: Some(SettingValue {
+                        value: Some(setting_value::Value::StringValue(mode.into())),
+                    }),
+                    scope: scope as i32,
+                },
+            )])
+        };
+        assert_eq!(
+            AutoApprove::from_settings(&HashMap::new()),
+            AutoApprove::default()
+        );
+        assert_eq!(
+            AutoApprove::from_settings(&setting("auto", SettingScope::Sandbox)),
+            AutoApprove {
+                enabled: true,
+                gateway_wide: false
+            }
+        );
+        assert_eq!(
+            AutoApprove::from_settings(&setting("manual", SettingScope::Global)),
+            AutoApprove {
+                enabled: false,
+                gateway_wide: true
+            }
+        );
+        // Registered but unset: an empty value is manual.
+        let unset = HashMap::from([(
+            APPROVAL_MODE_KEY.to_owned(),
+            proto::EffectiveSetting::default(),
+        )]);
+        assert!(!AutoApprove::from_settings(&unset).enabled);
+    }
 
     #[test]
     fn phases_map_to_app_states() {

@@ -5,6 +5,7 @@ use adw::subclass::prelude::*;
 use gtk::{gio, glib};
 
 use super::accounts;
+use super::approvals::ApprovalBar;
 use super::console;
 use super::detail::{self, SandboxAction};
 use super::dialogs;
@@ -71,6 +72,8 @@ mod imp {
         /// Sandboxes created from New Agent that still need their folder
         /// mounted and agent started once they are running.
         pub pending_launch: RefCell<std::collections::HashMap<String, Option<std::path::PathBuf>>>,
+        /// Blocked-request bars in open terminal windows.
+        pub approval_bars: RefCell<Vec<ApprovalBar>>,
     }
 
     #[glib::object_subclass]
@@ -244,24 +247,58 @@ impl Window {
             }
             Action::OpenTerminal(name) => console::open_shell(self, &name),
             Action::Stop(name) => self.send(Command::Stop(name)),
-            Action::Review(name) => {
-                self.present();
-                let index = self
-                    .imp()
-                    .sandboxes
-                    .borrow()
-                    .iter()
-                    .position(|s| s.name == name);
-                let list = &self.imp().sidebar_list;
-                if let Some(row) = index.and_then(|i| list.row_at_index(i as i32)) {
-                    list.select_row(Some(&row));
-                }
-            }
+            Action::Review(name) => self.review(&name),
             Action::Quit => {
                 if let Some(app) = self.application() {
                     app.quit();
                 }
             }
+        }
+    }
+
+    /// Shows the window with `sandbox` selected, where its blocked requests
+    /// and policy are.
+    pub fn review(&self, sandbox: &str) {
+        self.present();
+        let index = self
+            .imp()
+            .sandboxes
+            .borrow()
+            .iter()
+            .position(|s| s.name == sandbox);
+        let list = &self.imp().sidebar_list;
+        if let Some(row) = index.and_then(|i| list.row_at_index(i as i32)) {
+            list.select_row(Some(&row));
+        }
+    }
+
+    /// Keeps `bar` showing its sandbox's blocked requests while its terminal
+    /// is open.
+    pub fn add_approval_bar(&self, bar: ApprovalBar) {
+        let imp = self.imp();
+        let prompts = imp
+            .sandboxes
+            .borrow()
+            .iter()
+            .find(|s| s.name == bar.sandbox())
+            .map(|s| s.prompts.clone())
+            .unwrap_or_default();
+        bar.update(&prompts);
+        imp.approval_bars.borrow_mut().push(bar);
+    }
+
+    fn update_approval_bars(&self) {
+        let imp = self.imp();
+        let sandboxes = imp.sandboxes.borrow();
+        let mut bars = imp.approval_bars.borrow_mut();
+        bars.retain(ApprovalBar::is_open);
+        for bar in bars.iter() {
+            let prompts = sandboxes
+                .iter()
+                .find(|s| s.name == bar.sandbox())
+                .map(|s| s.prompts.as_slice())
+                .unwrap_or_default();
+            bar.update(prompts);
         }
     }
 
@@ -417,6 +454,7 @@ impl Window {
                         s.phase.clone(),
                         s.memory_used_mb,
                         s.policy.as_ref().map(|p| p.version),
+                        s.auto_approve,
                         s.rules.len(),
                         chunks,
                         mounts,
@@ -425,6 +463,8 @@ impl Window {
                 .collect::<Vec<_>>()
         };
         if key(&imp.sandboxes.borrow()) == key(&new) {
+            // A bar hidden on an answer that then failed shows again.
+            self.update_approval_bars();
             return;
         }
         let selected_name = imp
@@ -442,6 +482,7 @@ impl Window {
             self.refresh_detail();
         }
         self.refresh_policy_dialog();
+        self.update_approval_bars();
     }
 
     /// Raises a desktop notification for each blocked request not seen before.
@@ -913,6 +954,10 @@ impl Window {
                     self.answer_prompt(&sandbox.name, &prompt.chunk_id, false);
                 }
             }
+            SandboxAction::SetAutoApprove(enabled) => self.send(Command::SetAutoApprove {
+                sandbox: sandbox.name,
+                enabled,
+            }),
             SandboxAction::PolicyRules => self.policy_dialog(&sandbox),
             SandboxAction::AddRule => self.edit_policy(PolicyEdit::AddRule),
             SandboxAction::RemoveRule(i) => {
