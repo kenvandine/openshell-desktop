@@ -7,5 +7,6 @@ description = "GNOME desktop manager for NVIDIA OpenShell sandboxes on LXD / Mic
 repository = "https://github.com/kenvandine/openshell-desktop"
 
 [dependencies]
-# gnome_46 matches Ubuntu 24.04 / core24 (GTK 4.14, libadwaita 1.5).
-relm4 = { version = "0.11", features = ["libadwaita", "gnome_46"] }
+# Feature floors match Ubuntu 24.04 / core24 (GTK 4.14, libadwaita 1.5).
+adw = { package = "libadwaita", version = "0.9", features = ["v1_5"] }
+gtk = { package = "gtk4", version = "0.11", features = ["v4_14"] }

@@ -1,10 +1,9 @@
 //! The right-hand pane: status, Policy Advisor, mounts, network and resources
 //! for the selected sandbox, laid out as an `AdwPreferencesPage`.
 
-use relm4::adw::prelude::*;
-use relm4::{ComponentSender, adw, gtk};
+use adw::prelude::*;
 
-use super::window::{App, AppMsg};
+use super::window::Window;
 use crate::model::{Access, Sandbox, SandboxState, format_mb};
 
 #[derive(Debug, Clone)]
@@ -19,41 +18,44 @@ pub enum SandboxAction {
     TerminateAndPurge,
 }
 
-pub fn build(sandbox: &Sandbox, sender: &ComponentSender<App>) -> adw::PreferencesPage {
+pub fn build(sandbox: &Sandbox, window: &Window) -> adw::PreferencesPage {
     let page = adw::PreferencesPage::new();
-    page.add(&status_group(sandbox, sender));
-    page.add(&advisor_group(sandbox, sender));
-    page.add(&mounts_group(sandbox, sender));
-    page.add(&network_group(sandbox, sender));
+    page.add(&status_group(sandbox, window));
+    page.add(&advisor_group(sandbox, window));
+    page.add(&mounts_group(sandbox, window));
+    page.add(&network_group(sandbox, window));
     page.add(&resources_group(sandbox));
-    page.add(&danger_group(sender));
+    page.add(&danger_group(window));
     page
 }
 
-fn action_button(label: &str, action: SandboxAction, sender: &ComponentSender<App>) -> gtk::Button {
+fn action_button(label: &str, action: SandboxAction, window: &Window) -> gtk::Button {
     let button = gtk::Button::with_label(label);
     button.set_valign(gtk::Align::Center);
-    let sender = sender.clone();
-    button.connect_clicked(move |_| sender.input(AppMsg::Action(action.clone())));
+    let window = window.downgrade();
+    button.connect_clicked(move |_| {
+        if let Some(window) = window.upgrade() {
+            window.handle_action(action.clone());
+        }
+    });
     button
 }
 
-fn icon_button(
-    icon: &str,
-    tooltip: &str,
-    action: SandboxAction,
-    sender: &ComponentSender<App>,
-) -> gtk::Button {
+fn icon_button(icon: &str, tooltip: &str, action: SandboxAction, window: &Window) -> gtk::Button {
     let button = gtk::Button::from_icon_name(icon);
     button.set_tooltip_text(Some(tooltip));
     button.add_css_class("flat");
     button.set_valign(gtk::Align::Center);
-    let sender = sender.clone();
-    button.connect_clicked(move |_| sender.input(AppMsg::Action(action.clone())));
+    let window = window.downgrade();
+    button.connect_clicked(move |_| {
+        if let Some(window) = window.upgrade() {
+            window.handle_action(action.clone());
+        }
+    });
     button
 }
 
-fn status_group(sandbox: &Sandbox, sender: &ComponentSender<App>) -> adw::PreferencesGroup {
+fn status_group(sandbox: &Sandbox, window: &Window) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder()
         .title(format!("Active Sandbox: {}", sandbox.name))
         .description(format!("Profile: {}", sandbox.profile))
@@ -92,15 +94,15 @@ fn status_group(sandbox: &Sandbox, sender: &ComponentSender<App>) -> adw::Prefer
     let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     buttons.set_halign(gtk::Align::Center);
     buttons.set_margin_top(12);
-    let terminal = action_button("Open Terminal", SandboxAction::OpenTerminal, sender);
+    let terminal = action_button("Open Terminal", SandboxAction::OpenTerminal, window);
     terminal.set_sensitive(running);
     buttons.append(&terminal);
-    let rules = action_button("Policy Rules", SandboxAction::PolicyRules, sender);
+    let rules = action_button("Policy Rules", SandboxAction::PolicyRules, window);
     buttons.append(&rules);
     let toggle = action_button(
         if running { "Stop" } else { "Start" },
         SandboxAction::ToggleRunning,
-        sender,
+        window,
     );
     toggle.add_css_class(if running {
         "destructive-action"
@@ -115,7 +117,7 @@ fn status_group(sandbox: &Sandbox, sender: &ComponentSender<App>) -> adw::Prefer
     group
 }
 
-fn advisor_group(sandbox: &Sandbox, sender: &ComponentSender<App>) -> adw::PreferencesGroup {
+fn advisor_group(sandbox: &Sandbox, window: &Window) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder()
         .title("Policy Advisor")
         .description("Recent outbound requests blocked by the OpenShell proxy")
@@ -134,20 +136,20 @@ fn advisor_group(sandbox: &Sandbox, sender: &ComponentSender<App>) -> adw::Prefe
             .subtitle(format!("Requested by: {}", prompt.binary))
             .build();
         row.add_prefix(&gtk::Image::from_icon_name("dialog-warning-symbolic"));
-        let allow = action_button("Allow Domain", SandboxAction::AllowDomain(i), sender);
+        let allow = action_button("Allow Domain", SandboxAction::AllowDomain(i), window);
         allow.add_css_class("suggested-action");
         row.add_suffix(&allow);
         row.add_suffix(&action_button(
             "Ignore",
             SandboxAction::IgnorePrompt(i),
-            sender,
+            window,
         ));
         group.add(&row);
     }
     group
 }
 
-fn mounts_group(sandbox: &Sandbox, sender: &ComponentSender<App>) -> adw::PreferencesGroup {
+fn mounts_group(sandbox: &Sandbox, window: &Window) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder()
         .title("Filesystem Mounts")
         .build();
@@ -155,7 +157,7 @@ fn mounts_group(sandbox: &Sandbox, sender: &ComponentSender<App>) -> adw::Prefer
         "list-add-symbolic",
         "Add mount",
         SandboxAction::AddMount,
-        sender,
+        window,
     )));
 
     for mount in &sandbox.mounts {
@@ -177,7 +179,7 @@ fn mounts_group(sandbox: &Sandbox, sender: &ComponentSender<App>) -> adw::Prefer
     group
 }
 
-fn network_group(sandbox: &Sandbox, sender: &ComponentSender<App>) -> adw::PreferencesGroup {
+fn network_group(sandbox: &Sandbox, window: &Window) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder()
         .title("Network Rules")
         .description("Allowed egress destinations")
@@ -186,7 +188,7 @@ fn network_group(sandbox: &Sandbox, sender: &ComponentSender<App>) -> adw::Prefe
         "list-add-symbolic",
         "Add rule",
         SandboxAction::AddRule,
-        sender,
+        window,
     )));
 
     if sandbox.rules.is_empty() {
@@ -230,12 +232,12 @@ fn resources_group(sandbox: &Sandbox) -> adw::PreferencesGroup {
     group
 }
 
-fn danger_group(sender: &ComponentSender<App>) -> adw::PreferencesGroup {
+fn danger_group(window: &Window) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::new();
     let purge = action_button(
         "Terminate & Purge",
         SandboxAction::TerminateAndPurge,
-        sender,
+        window,
     );
     purge.add_css_class("destructive-action");
     purge.add_css_class("pill");

@@ -153,7 +153,8 @@ The UI adheres to the GNOME HIG using Libadwaita.
 
 ### Phase 2: Core Desktop Application (`openshell-desktop`)
 
-- Frontend in Rust (Relm4 / gtk4-rs / libadwaita).
+- Frontend in Rust (gtk4-rs + libadwaita, GtkBuilder templates; no cross-platform
+  UI layer, since the target is the Ubuntu/GNOME desktop).
 - Connect to OpenShell's local management socket and the LXD daemon over
   `/var/snap/lxd/common/lxd/unix.socket`.
 - Implement the visual policy editor and profile templates.

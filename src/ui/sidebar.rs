@@ -1,5 +1,4 @@
-use relm4::adw::prelude::*;
-use relm4::{adw, gtk};
+use adw::prelude::*;
 
 use crate::model::{Sandbox, SandboxState};
 

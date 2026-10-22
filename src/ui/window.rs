@@ -1,268 +1,197 @@
-use relm4::adw::prelude::*;
-use relm4::{ComponentParts, ComponentSender, RelmWidgetExt, SimpleComponent, adw, gtk};
+use std::cell::{Cell, RefCell};
+
+use adw::prelude::*;
+use adw::subclass::prelude::*;
+use gtk::{gio, glib};
 
 use super::detail::{self, SandboxAction};
 use super::sidebar;
 use crate::backend::lxd::{self, LxdStatus};
 use crate::model::{NetworkRule, Sandbox, SandboxState, sample_sandboxes};
 
-pub struct App {
-    sandboxes: Vec<Sandbox>,
-    selected: usize,
-    lxd: LxdStatus,
-    sidebar_list: gtk::ListBox,
-    detail: adw::Bin,
-    toasts: adw::ToastOverlay,
-}
+mod imp {
+    use super::*;
 
-#[derive(Debug)]
-pub enum AppMsg {
-    Select(usize),
-    Action(SandboxAction),
-    NewSandbox,
-    Settings,
-    About,
-}
+    #[derive(Default, gtk::CompositeTemplate)]
+    #[template(file = "../../data/ui/window.ui")]
+    pub struct Window {
+        #[template_child]
+        pub toasts: TemplateChild<adw::ToastOverlay>,
+        #[template_child]
+        pub sidebar_list: TemplateChild<gtk::ListBox>,
+        #[template_child]
+        pub content_page: TemplateChild<adw::NavigationPage>,
+        #[template_child]
+        pub status_label: TemplateChild<gtk::Label>,
+        #[template_child]
+        pub detail: TemplateChild<adw::Bin>,
 
-impl App {
-    fn status_label(&self) -> String {
-        match &self.lxd {
-            LxdStatus::Active { .. } => "Local LXD: Active ●".into(),
-            LxdStatus::Unavailable { .. } => "Local LXD: Unavailable".into(),
+        pub sandboxes: RefCell<Vec<Sandbox>>,
+        pub selected: Cell<usize>,
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for Window {
+        const NAME: &'static str = "OsdWindow";
+        type Type = super::Window;
+        type ParentType = adw::ApplicationWindow;
+
+        fn class_init(klass: &mut Self::Class) {
+            klass.bind_template();
+        }
+
+        fn instance_init(obj: &glib::subclass::InitializingObject<Self>) {
+            obj.init_template();
         }
     }
 
-    fn status_tooltip(&self) -> String {
-        let lxd = match &self.lxd {
+    impl ObjectImpl for Window {
+        fn constructed(&self) {
+            self.parent_constructed();
+            let obj = self.obj();
+            obj.setup_actions();
+            obj.setup_sidebar();
+            obj.update_status(&lxd::probe());
+        }
+    }
+
+    impl WidgetImpl for Window {}
+    impl WindowImpl for Window {}
+    impl ApplicationWindowImpl for Window {}
+    impl AdwApplicationWindowImpl for Window {}
+}
+
+glib::wrapper! {
+    pub struct Window(ObjectSubclass<imp::Window>)
+        @extends adw::ApplicationWindow, gtk::ApplicationWindow, gtk::Window, gtk::Widget,
+        @implements gio::ActionGroup, gio::ActionMap, gtk::Accessible, gtk::Buildable,
+            gtk::ConstraintTarget, gtk::Native, gtk::Root, gtk::ShortcutManager;
+}
+
+impl Window {
+    pub fn new(app: &adw::Application) -> Self {
+        glib::Object::builder().property("application", app).build()
+    }
+
+    fn setup_actions(&self) {
+        let new_sandbox = gio::ActionEntry::builder("new-sandbox")
+            .activate(|win: &Self, _, _| win.toast("New Sandbox wizard is not wired up yet"))
+            .build();
+        let preferences = gio::ActionEntry::builder("preferences")
+            .activate(|win: &Self, _, _| win.toast("Preferences are not wired up yet"))
+            .build();
+        self.add_action_entries([new_sandbox, preferences]);
+    }
+
+    fn setup_sidebar(&self) {
+        let imp = self.imp();
+        imp.sandboxes.replace(sample_sandboxes());
+        imp.sidebar_list.connect_row_selected(glib::clone!(
+            #[weak(rename_to = win)]
+            self,
+            move |_, row| {
+                if let Some(row) = row {
+                    win.select(row.index() as usize);
+                }
+            }
+        ));
+        sidebar::populate(&imp.sidebar_list, &imp.sandboxes.borrow(), 0);
+    }
+
+    fn update_status(&self, status: &LxdStatus) {
+        let label = &self.imp().status_label;
+        let lxd = match status {
             LxdStatus::Active { server_version } => {
+                label.set_label("Local LXD: Active ●");
                 format!(
                     "LXD {}",
                     server_version.as_deref().unwrap_or("(unknown version)")
                 )
             }
-            LxdStatus::Unavailable { reason } => format!("LXD unreachable: {reason}"),
+            LxdStatus::Unavailable { reason } => {
+                label.set_label("Local LXD: Unavailable");
+                format!("LXD unreachable: {reason}")
+            }
         };
-        format!("{lxd}\nOpenShell gateway: not connected yet\nSandbox list shows sample data")
+        label.set_tooltip_text(Some(&format!(
+            "{lxd}\nOpenShell gateway: not connected yet\nSandbox list shows sample data"
+        )));
+        let (add, remove) = if status.is_active() {
+            ("active", "inactive")
+        } else {
+            ("inactive", "active")
+        };
+        label.add_css_class(add);
+        label.remove_css_class(remove);
     }
 
-    fn status_classes(&self) -> [&'static str; 2] {
-        [
-            "status-pill",
-            if self.lxd.is_active() {
-                "active"
-            } else {
-                "inactive"
-            },
-        ]
+    fn select(&self, index: usize) {
+        let imp = self.imp();
+        if index >= imp.sandboxes.borrow().len() {
+            return;
+        }
+        imp.selected.set(index);
+        self.refresh_detail();
     }
 
-    fn current(&mut self) -> &mut Sandbox {
-        &mut self.sandboxes[self.selected]
-    }
-
-    fn refresh_detail(&self, sender: &ComponentSender<Self>) {
-        self.detail
-            .set_child(Some(&detail::build(&self.sandboxes[self.selected], sender)));
+    fn refresh_detail(&self) {
+        let imp = self.imp();
+        let sandboxes = imp.sandboxes.borrow();
+        let sandbox = &sandboxes[imp.selected.get()];
+        imp.content_page.set_title(&sandbox.name);
+        imp.detail.set_child(Some(&detail::build(sandbox, self)));
     }
 
     fn toast(&self, message: &str) {
-        self.toasts.add_toast(adw::Toast::new(message));
+        self.imp().toasts.add_toast(adw::Toast::new(message));
     }
 
-    fn handle_action(&mut self, action: SandboxAction, sender: &ComponentSender<Self>) {
-        match action {
-            SandboxAction::ToggleRunning => {
-                let sandbox = self.current();
-                sandbox.state = match sandbox.state {
-                    SandboxState::Running => SandboxState::Stopped,
-                    SandboxState::Stopped => SandboxState::Running,
-                };
-                sidebar::populate(&self.sidebar_list, &self.sandboxes, self.selected);
+    pub fn handle_action(&self, action: SandboxAction) {
+        let imp = self.imp();
+        let selected = imp.selected.get();
+        let mut message = None;
+        {
+            let mut sandboxes = imp.sandboxes.borrow_mut();
+            let sandbox = &mut sandboxes[selected];
+            match action {
+                SandboxAction::ToggleRunning => {
+                    sandbox.state = match sandbox.state {
+                        SandboxState::Running => SandboxState::Stopped,
+                        SandboxState::Stopped => SandboxState::Running,
+                    };
+                }
+                SandboxAction::AllowDomain(i) => {
+                    let prompt = sandbox.prompts.remove(i);
+                    message = Some(format!("Allowed {}:{}", prompt.host, prompt.port));
+                    sandbox.rules.push(NetworkRule {
+                        host: prompt.host,
+                        port: prompt.port,
+                    });
+                }
+                SandboxAction::IgnorePrompt(i) => {
+                    sandbox.prompts.remove(i);
+                }
+                SandboxAction::OpenTerminal => {
+                    message = Some("Terminal is not wired up yet".into())
+                }
+                SandboxAction::PolicyRules => {
+                    message = Some("Policy editor is not wired up yet".into())
+                }
+                SandboxAction::AddMount => {
+                    message = Some("Mount picker is not wired up yet".into())
+                }
+                SandboxAction::AddRule => message = Some("Rule editor is not wired up yet".into()),
+                SandboxAction::TerminateAndPurge => {
+                    message = Some("Terminate & Purge is not wired up yet".into())
+                }
             }
-            SandboxAction::AllowDomain(i) => {
-                let sandbox = self.current();
-                let prompt = sandbox.prompts.remove(i);
-                sandbox.rules.push(NetworkRule {
-                    host: prompt.host.clone(),
-                    port: prompt.port,
-                });
-                self.toast(&format!("Allowed {}:{}", prompt.host, prompt.port));
-            }
-            SandboxAction::IgnorePrompt(i) => {
-                self.current().prompts.remove(i);
-            }
-            SandboxAction::OpenTerminal => self.toast("Terminal is not wired up yet"),
-            SandboxAction::PolicyRules => self.toast("Policy editor is not wired up yet"),
-            SandboxAction::AddMount => self.toast("Mount picker is not wired up yet"),
-            SandboxAction::AddRule => self.toast("Rule editor is not wired up yet"),
-            SandboxAction::TerminateAndPurge => self.toast("Terminate & Purge is not wired up yet"),
         }
-        self.refresh_detail(sender);
-    }
-}
 
-#[relm4::component(pub)]
-impl SimpleComponent for App {
-    type Init = ();
-    type Input = AppMsg;
-    type Output = ();
-
-    view! {
-        adw::ApplicationWindow {
-            set_title: Some("OpenShell Manager"),
-            set_default_width: 1100,
-            set_default_height: 760,
-            set_width_request: 360,
-            set_height_request: 400,
-
-            add_breakpoint = adw::Breakpoint::new(adw::BreakpointCondition::new_length(
-                adw::BreakpointConditionLengthType::MaxWidth,
-                640.0,
-                adw::LengthUnit::Sp,
-            )) {
-                add_setter: (&split_view, "collapsed", Some(&true.to_value())),
-            },
-
-            #[local_ref]
-            toasts -> adw::ToastOverlay {
-                #[name = "split_view"]
-                adw::NavigationSplitView {
-                    #[wrap(Some)]
-                    set_sidebar = &adw::NavigationPage {
-                        set_title: "Sandboxes",
-
-                        #[wrap(Some)]
-                        set_child = &adw::ToolbarView {
-                            add_top_bar = &adw::HeaderBar {
-                                pack_start = &gtk::MenuButton {
-                                    set_icon_name: "open-menu-symbolic",
-                                    set_tooltip_text: Some("Main Menu"),
-                                    #[wrap(Some)]
-                                    set_popover = &gtk::Popover {
-                                        gtk::Button {
-                                            set_label: "About OpenShell Manager",
-                                            add_css_class: "flat",
-                                            connect_clicked => AppMsg::About,
-                                        },
-                                    },
-                                },
-                            },
-
-                            #[wrap(Some)]
-                            set_content = &gtk::ScrolledWindow {
-                                set_vexpand: true,
-                                set_hscrollbar_policy: gtk::PolicyType::Never,
-
-                                #[local_ref]
-                                sidebar_list -> gtk::ListBox {
-                                    add_css_class: "navigation-sidebar",
-                                    connect_row_selected[sender] => move |_, row| {
-                                        if let Some(row) = row {
-                                            sender.input(AppMsg::Select(row.index() as usize));
-                                        }
-                                    },
-                                },
-                            },
-
-                            add_bottom_bar = &gtk::Box {
-                                set_orientation: gtk::Orientation::Vertical,
-                                set_spacing: 6,
-                                set_margin_all: 6,
-
-                                gtk::Button {
-                                    add_css_class: "flat",
-                                    #[wrap(Some)]
-                                    set_child = &adw::ButtonContent {
-                                        set_icon_name: "list-add-symbolic",
-                                        set_label: "New Sandbox",
-                                    },
-                                    connect_clicked => AppMsg::NewSandbox,
-                                },
-                                gtk::Button {
-                                    add_css_class: "flat",
-                                    #[wrap(Some)]
-                                    set_child = &adw::ButtonContent {
-                                        set_icon_name: "emblem-system-symbolic",
-                                        set_label: "Settings",
-                                    },
-                                    connect_clicked => AppMsg::Settings,
-                                },
-                            },
-                        },
-                    },
-
-                    #[wrap(Some)]
-                    set_content = &adw::NavigationPage {
-                        #[watch]
-                        set_title: &model.sandboxes[model.selected].name,
-
-                        #[wrap(Some)]
-                        set_child = &adw::ToolbarView {
-                            add_top_bar = &adw::HeaderBar {
-                                #[wrap(Some)]
-                                set_title_widget = &gtk::Label {
-                                    set_label: &model.status_label(),
-                                    set_tooltip_text: Some(&model.status_tooltip()),
-                                    set_css_classes: &model.status_classes(),
-                                },
-                            },
-
-                            #[wrap(Some)]
-                            #[local_ref]
-                            set_content = detail -> adw::Bin {},
-                        },
-                    },
-                },
-            },
-        }
-    }
-
-    fn init(
-        _init: Self::Init,
-        root: Self::Root,
-        sender: ComponentSender<Self>,
-    ) -> ComponentParts<Self> {
-        let model = App {
-            sandboxes: sample_sandboxes(),
-            selected: 0,
-            lxd: lxd::probe(),
-            sidebar_list: gtk::ListBox::new(),
-            detail: adw::Bin::new(),
-            toasts: adw::ToastOverlay::new(),
-        };
-
-        let sidebar_list = &model.sidebar_list;
-        let detail = &model.detail;
-        let toasts = &model.toasts;
-        let widgets = view_output!();
-
-        sidebar::populate(&model.sidebar_list, &model.sandboxes, model.selected);
-        model.refresh_detail(&sender);
-
-        ComponentParts { model, widgets }
-    }
-
-    fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>) {
-        match msg {
-            AppMsg::Select(index) if index < self.sandboxes.len() => {
-                self.selected = index;
-                self.refresh_detail(&sender);
-            }
-            AppMsg::Select(_) => {}
-            AppMsg::Action(action) => self.handle_action(action, &sender),
-            AppMsg::NewSandbox => self.toast("New Sandbox wizard is not wired up yet"),
-            AppMsg::Settings => self.toast("Settings are not wired up yet"),
-            AppMsg::About => {
-                let about = adw::AboutDialog::builder()
-                    .application_name("OpenShell Manager")
-                    .application_icon("utilities-terminal")
-                    .version(env!("CARGO_PKG_VERSION"))
-                    .website(env!("CARGO_PKG_REPOSITORY"))
-                    .license_type(gtk::License::Apache20)
-                    .comments("Configure, launch and monitor NVIDIA OpenShell sandboxes on LXD")
-                    .build();
-                about.present(self.toasts.root().as_ref());
-            }
+        // Repopulating reselects the current row, which also refreshes the
+        // detail pane through `select`.
+        sidebar::populate(&imp.sidebar_list, &imp.sandboxes.borrow(), selected);
+        if let Some(message) = message {
+            self.toast(&message);
         }
     }
 }

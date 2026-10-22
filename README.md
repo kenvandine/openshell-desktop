@@ -15,6 +15,9 @@ agent sandboxes, running on local LXD or a MicroCloud cluster.
 ## Building
 
 Requires Rust (2024 edition), GTK ≥ 4.14 and libadwaita ≥ 1.5 (Ubuntu 24.04 or newer).
+The app is plain gtk4-rs + libadwaita with a GtkBuilder template, the same
+stack as GNOME's own Rust apps, so it picks up Ubuntu's Yaru icons, fonts and
+accent colour like any other GNOME app on the desktop.
 
 ```sh
 sudo apt install libgtk-4-dev libadwaita-1-dev
@@ -25,7 +28,8 @@ cargo run
 
 | Path | What |
 |---|---|
-| `src/ui/window.rs` | Main Relm4 component: split view, header status pill, toasts |
+| `data/ui/window.ui` | Window layout as a GtkBuilder template: split view, header bar, primary menu |
+| `src/ui/window.rs` | `AdwApplicationWindow` subclass bound to the template; state, actions, status pill |
 | `src/ui/sidebar.rs` | Sandbox list |
 | `src/ui/detail.rs` | Sandbox detail `AdwPreferencesPage` (status, Policy Advisor, mounts, network, resources) |
 | `src/model.rs` | View-model types and sample data |
