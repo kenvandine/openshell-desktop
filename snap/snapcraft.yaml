@@ -80,6 +80,9 @@ parts:
     plugin: rust
     source: .
     rust-channel: stable
+    # The rust plugin installs rust-channel with rustup from this snap.
+    build-snaps:
+      - rustup
     rust-path:
       - .
       - crates/openshell-driver-lxd
