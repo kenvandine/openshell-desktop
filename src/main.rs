@@ -1,6 +1,7 @@
 mod gateway;
 mod model;
 mod settings;
+mod shell;
 mod terminal;
 mod ui;
 

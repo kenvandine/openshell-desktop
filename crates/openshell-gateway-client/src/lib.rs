@@ -19,7 +19,12 @@ use openshell_core::proto::{
 };
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 
+mod exec;
+mod providers;
+
+pub use exec::{ExecInput, ExecOptions, ExecOutput, ExecOutputStream};
 pub use openshell_core::proto;
+pub use providers::{CredentialField, ProfileInfo, ProviderInfo, bundled_profiles};
 pub use tonic::{Code, Status};
 
 /// Port the snap's gateway listens on unless `gateway-port` is set.
@@ -288,6 +293,11 @@ pub struct CreateOptions {
     /// Memory in MiB; 0 means no limit.
     pub memory_mb: u32,
     pub gpu: bool,
+    /// Providers whose credentials the sandbox may use.
+    pub providers: Vec<String>,
+    /// The sandbox's main process; empty leaves the gateway's login shell.
+    pub command: Vec<String>,
+    pub environment: Vec<(String, String)>,
 }
 
 impl CreateOptions {
@@ -323,6 +333,10 @@ impl CreateOptions {
         });
         SandboxSpec {
             template,
+            providers: self.providers.clone(),
+            command: self.command.clone(),
+            tty: !self.command.is_empty(),
+            environment: self.environment.iter().cloned().collect(),
             resource_requirements: self.gpu.then_some(ResourceRequirements {
                 gpu: Some(GpuResourceRequirements { count: Some(1) }),
             }),
@@ -800,6 +814,7 @@ mod tests {
             cpus: 2,
             memory_mb: 4096,
             gpu: true,
+            ..Default::default()
         }
         .spec();
         let template = spec.template.unwrap();
@@ -823,6 +838,22 @@ mod tests {
 
         let bare = CreateOptions::default().spec();
         assert!(bare.template.is_none() && bare.resource_requirements.is_none());
+        assert!(bare.command.is_empty() && !bare.tty);
+    }
+
+    #[test]
+    fn create_options_carry_providers_and_the_agent_command() {
+        let spec = CreateOptions {
+            providers: vec!["claude".into()],
+            command: vec!["claude".into()],
+            environment: vec![("TERM".into(), "xterm-256color".into())],
+            ..Default::default()
+        }
+        .spec();
+        assert_eq!(spec.providers, ["claude"]);
+        assert_eq!(spec.command, ["claude"]);
+        assert!(spec.tty, "an agent's main process needs a terminal");
+        assert_eq!(spec.environment["TERM"], "xterm-256color");
     }
 
     #[test]

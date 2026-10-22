@@ -9,6 +9,7 @@ use crate::model::{Access, Sandbox, SandboxState, format_mb};
 #[derive(Debug, Clone)]
 pub enum SandboxAction {
     OpenTerminal,
+    DebugConsole,
     PolicyRules,
     ToggleRunning,
     AllowDomain(usize),
@@ -27,6 +28,7 @@ pub fn build(sandbox: &Sandbox, window: &Window) -> adw::PreferencesPage {
     page.add(&mounts_group(sandbox, window));
     page.add(&network_group(sandbox, window));
     page.add(&resources_group(sandbox));
+    page.add(&troubleshooting_group(sandbox, window));
     page.add(&danger_group(window));
     page
 }
@@ -272,6 +274,24 @@ fn resources_group(sandbox: &Sandbox) -> adw::PreferencesGroup {
         "GPU passthrough",
         if sandbox.gpu_passthrough { "On" } else { "Off" }.to_owned(),
     ));
+    group
+}
+
+fn troubleshooting_group(sandbox: &Sandbox, window: &Window) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::builder()
+        .title("Troubleshooting")
+        .build();
+    let row = adw::ActionRow::builder()
+        .title("Debug Console")
+        .subtitle(
+            "A shell in the LXD instance itself, outside the sandbox policy and \
+             without its credentials",
+        )
+        .build();
+    let open = action_button("Open", SandboxAction::DebugConsole, window);
+    open.set_sensitive(sandbox.state == SandboxState::Running && !sandbox.instance.is_empty());
+    row.add_suffix(&open);
+    group.add(&row);
     group
 }
 
