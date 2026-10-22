@@ -196,7 +196,21 @@ impl Window {
                     move |_| {
                         let dialog =
                             adw::AlertDialog::new(Some("Something Went Wrong"), Some(&message));
-                        dialog.add_response("close", "Close");
+                        dialog.add_responses(&[("copy", "Copy"), ("close", "Close")]);
+                        dialog.set_default_response(Some("close"));
+                        dialog.set_close_response("close");
+                        let message = message.clone();
+                        dialog.connect_response(
+                            Some("copy"),
+                            glib::clone!(
+                                #[weak]
+                                win,
+                                move |_, _| {
+                                    win.clipboard().set_text(&message);
+                                    win.toast("Error copied");
+                                }
+                            ),
+                        );
                         dialog.present(Some(&win));
                     }
                 ));
