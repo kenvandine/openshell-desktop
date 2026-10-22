@@ -119,7 +119,11 @@ parts:
       - cmake
       - curl
       - libclang-dev
+      # openshell-gateway links its policy prover against the system libz3.
+      - libz3-dev
       - pkg-config
+    stage-packages:
+      - libz3-4
     build-environment:
       - PKG_CONFIG_PATH: $CRAFT_STAGE/share/pkgconfig:${PKG_CONFIG_PATH:-}
       - LIBRARY_PATH: $CRAFT_STAGE/lib:${LIBRARY_PATH:-}
