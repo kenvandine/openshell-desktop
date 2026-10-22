@@ -1,4 +1,5 @@
 mod gateway;
+mod indicator;
 mod model;
 mod settings;
 mod shell;
@@ -59,6 +60,18 @@ fn install_actions(app: &adw::Application) {
         .build();
     // Targets of a blocked-request notification's buttons, with the sandbox
     // name and draft chunk ID as parameter.
+    // Target of a sandbox-ready notification's button, with the sandbox name.
+    let open_terminal = gtk::gio::ActionEntry::builder("open-terminal")
+        .parameter_type(Some(&String::static_variant_type()))
+        .activate(|app: &adw::Application, _, target| {
+            let Some(sandbox) = target.and_then(|t| t.get::<String>()) else {
+                return;
+            };
+            if let Some(window) = app.active_window().and_downcast::<ui::window::Window>() {
+                ui::console::open_shell(&window, &sandbox);
+            }
+        })
+        .build();
     let answer = |name: &str, allow: bool| {
         gtk::gio::ActionEntry::builder(name)
             .parameter_type(Some(&<(String, String)>::static_variant_type()))
@@ -78,6 +91,7 @@ fn install_actions(app: &adw::Application) {
         about,
         quit,
         show_window,
+        open_terminal,
         answer("allow-request", true),
         answer("ignore-request", false),
     ]);
