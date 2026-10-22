@@ -98,6 +98,8 @@ pub struct Sandbox {
     pub prompts: Vec<AdvisorPrompt>,
     /// The gateway's policy; `None` for LXD-only data or while provisioning.
     pub policy: Option<PolicyView>,
+    /// Catalog id of the agent the app installs and runs in it.
+    pub agent: Option<String>,
 }
 
 impl Sandbox {
@@ -184,6 +186,7 @@ impl Sandbox {
             rules: vec![],
             prompts: vec![],
             policy: None,
+            agent: None,
         }
     }
 }
@@ -211,6 +214,7 @@ impl Sandbox {
             rules: vec![],
             prompts: vec![],
             policy: None,
+            agent: None,
         });
         sandbox.name = info.name.clone();
         sandbox.state = match info.state {
@@ -219,6 +223,7 @@ impl Sandbox {
             State::Transitioning | State::Failed => SandboxState::Busy,
         };
         sandbox.phase = info.phase.clone();
+        sandbox.agent = info.agent.clone();
         sandbox.status_detail = info.detail.clone();
         sandbox.rules = snapshot
             .policy

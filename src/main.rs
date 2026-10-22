@@ -1,5 +1,6 @@
 mod gateway;
 mod indicator;
+mod install;
 mod model;
 mod settings;
 mod shell;

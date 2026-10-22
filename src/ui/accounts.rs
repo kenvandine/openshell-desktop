@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use adw::prelude::*;
 use gtk::glib;
-use openshell_gateway_client::{ProfileInfo, ProviderInfo};
+use openshell_gateway_client::ProfileInfo;
 
 use super::window::Window;
 use crate::gateway::{Command, Credentials};
@@ -180,7 +180,9 @@ fn enter_key(window: &Window, dialog: &adw::PreferencesDialog, profile: &Profile
         ))
         .build();
     let name = adw::EntryRow::builder().title("Account name").build();
-    name.set_text(&unique_name(&profile.id, &providers));
+    name.set_text(&super::new_agent::unique(&profile.id, |n| {
+        providers.iter().any(|p| p.name == n)
+    }));
     group.add(&name);
 
     let mut fields = Vec::new();
@@ -258,41 +260,4 @@ fn enter_key(window: &Window, dialog: &adw::PreferencesDialog, profile: &Profile
     toolbar.add_top_bar(&header);
     toolbar.set_content(Some(&content));
     dialog.push_subpage(&adw::NavigationPage::new(&toolbar, &profile.display_name));
-}
-
-/// `base`, or `base-2`, `base-3`… when an account already has that name.
-fn unique_name(base: &str, providers: &[ProviderInfo]) -> String {
-    let taken = |name: &str| providers.iter().any(|p| p.name == name);
-    if !taken(base) {
-        return base.to_owned();
-    }
-    (2..)
-        .map(|n| format!("{base}-{n}"))
-        .find(|name| !taken(name))
-        .expect("an unused name")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn provider(name: &str) -> ProviderInfo {
-        ProviderInfo {
-            name: name.into(),
-            kind: "claude-code".into(),
-            credential_keys: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn unique_name_skips_taken_names() {
-        assert_eq!(unique_name("claude-code", &[]), "claude-code");
-        assert_eq!(
-            unique_name(
-                "claude-code",
-                &[provider("claude-code"), provider("claude-code-2")]
-            ),
-            "claude-code-3"
-        );
-    }
 }

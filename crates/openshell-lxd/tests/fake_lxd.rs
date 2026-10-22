@@ -19,6 +19,7 @@ enum Seen {
     Control(Value),
     Patch(Value),
     Put(Value),
+    File(Vec<String>, Vec<u8>),
 }
 
 fn read_request(stream: &mut UnixStream) -> (String, Vec<String>, Vec<u8>) {
@@ -87,6 +88,14 @@ fn serve(stream: UnixStream, seen: Sender<Seen>) {
                 "expanded_devices": {"work": {"type": "disk", "source": "/home/me/work", "path": "/workspace"}},
                 "state": {"memory": {"usage": 104857600}}
             }]}),
+        ),
+        "/1.0/instances/c1/files?path=/usr/local/bin/my%20agent" => {
+            seen.send(Seen::File(headers, body)).unwrap();
+            respond(stream, json!({"type": "sync", "metadata": {}}));
+        }
+        "/1.0/instances/missing/files?path=/usr/local/bin/agent" => respond(
+            stream,
+            json!({"type": "error", "error": "Instance not found", "error_code": 404}),
         ),
         "/1.0/instances/c1" if request_line.starts_with("PATCH") => {
             seen.send(Seen::Patch(serde_json::from_slice(&body).unwrap()))
@@ -279,4 +288,36 @@ fn adds_and_removes_host_folder_mounts() {
 
     let error = client.remove_device("c1", "root").unwrap_err();
     assert!(error.contains("profile"), "{error}");
+}
+
+#[test]
+fn pushes_files_into_an_instance() {
+    let (_dir, client, seen) = fake_lxd();
+    let content = b"#!/bin/sh\necho hi\n";
+    client
+        .push_file(
+            "c1",
+            "/usr/local/bin/my agent",
+            0o755,
+            &mut &content[..],
+            content.len() as u64,
+        )
+        .unwrap();
+    let Seen::File(headers, body) = seen.recv_timeout(Duration::from_secs(5)).unwrap() else {
+        panic!("expected a file upload");
+    };
+    assert_eq!(body, content);
+    for header in [
+        "X-LXD-type: file",
+        "X-LXD-mode: 0755",
+        "X-LXD-uid: 0",
+        "X-LXD-write: overwrite",
+    ] {
+        assert!(headers.iter().any(|h| h == header), "missing {header}");
+    }
+
+    let error = client
+        .push_file("missing", "/usr/local/bin/agent", 0o755, &mut &b"x"[..], 1)
+        .unwrap_err();
+    assert_eq!(error, "Instance not found");
 }

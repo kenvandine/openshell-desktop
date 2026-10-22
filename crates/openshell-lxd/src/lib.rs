@@ -307,6 +307,48 @@ impl Client {
         self.request_and_wait("PUT", &path, &config)
     }
 
+    /// Writes `len` bytes from `content` to `path` in `instance`, as a file
+    /// owned by root with `mode`, replacing any file already there. The
+    /// parent directory must exist. Unlike a mount, this works on the
+    /// instance's own root filesystem, outside any policy inside it.
+    pub fn push_file(
+        &self,
+        instance: &str,
+        path: &str,
+        mode: u32,
+        content: &mut impl Read,
+        len: u64,
+    ) -> Result<(), String> {
+        let mut stream = self.connect()?;
+        // LXD answers once it has stored the whole file.
+        stream
+            .set_read_timeout(Some(Duration::from_secs(120)))
+            .map_err(|e| e.to_string())?;
+        let head = format!(
+            "POST /1.0/instances/{instance}/files?path={} HTTP/1.0\r\nHost: lxd\r\n\
+             Content-Type: application/octet-stream\r\nContent-Length: {len}\r\n\
+             X-LXD-type: file\r\nX-LXD-uid: 0\r\nX-LXD-gid: 0\r\n\
+             X-LXD-mode: {mode:04o}\r\nX-LXD-write: overwrite\r\n\r\n",
+            query_escape(path)
+        );
+        stream
+            .write_all(head.as_bytes())
+            .map_err(|e| e.to_string())?;
+        let copied = std::io::copy(&mut content.take(len), &mut stream)
+            .map_err(|e| format!("sending {path}: {e}"))?;
+        if copied != len {
+            return Err(format!("{path}: only {copied} of {len} bytes to send"));
+        }
+        let envelope = read_envelope(&mut stream)?;
+        match envelope["type"].as_str() {
+            Some("error") => Err(envelope["error"]
+                .as_str()
+                .unwrap_or("unknown LXD error")
+                .to_owned()),
+            _ => Ok(()),
+        }
+    }
+
     /// Sends a request that may run as a background operation, and waits for
     /// that operation to finish.
     fn request_and_wait(&self, method: &str, path: &str, body: &Value) -> Result<(), String> {
@@ -364,16 +406,7 @@ impl Client {
             .write_all(request.as_bytes())
             .map_err(|e| e.to_string())?;
 
-        let mut response = String::new();
-        stream
-            .read_to_string(&mut response)
-            .map_err(|e| e.to_string())?;
-        let (_, body) = response
-            .split_once("\r\n\r\n")
-            .ok_or("malformed HTTP response")?;
-        let envelope: Value =
-            serde_json::from_str(body).map_err(|e| format!("bad JSON from LXD: {e}"))?;
-
+        let envelope = read_envelope(&mut stream)?;
         match envelope["type"].as_str() {
             Some("error") => Err(envelope["error"]
                 .as_str()
@@ -382,6 +415,31 @@ impl Client {
             kind => Ok((kind.unwrap_or_default().to_owned(), envelope)),
         }
     }
+}
+
+/// Reads an HTTP/1.0 response to its end and parses LXD's JSON envelope.
+fn read_envelope(stream: &mut UnixStream) -> Result<Value, String> {
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|e| e.to_string())?;
+    let (_, body) = response
+        .split_once("\r\n\r\n")
+        .ok_or("malformed HTTP response")?;
+    serde_json::from_str(body).map_err(|e| format!("bad JSON from LXD: {e}"))
+}
+
+/// Percent-encodes a path for a query string; `/` stays readable.
+fn query_escape(value: &str) -> String {
+    value
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 /// Parses LXD memory limits such as `4GiB`, `512MB` or `2048` (bytes) into MiB.
@@ -410,6 +468,15 @@ pub fn parse_memory_mb(value: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn escapes_query_paths() {
+        assert_eq!(
+            query_escape("/usr/local/bin/claude"),
+            "/usr/local/bin/claude"
+        );
+        assert_eq!(query_escape("/a b&c"), "/a%20b%26c");
+    }
 
     #[test]
     fn parses_memory_limits() {

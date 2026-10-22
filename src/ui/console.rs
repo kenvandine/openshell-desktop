@@ -7,6 +7,9 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::glib;
 
+use openshell_agents::Agent;
+use openshell_gateway_client::ExecOptions;
+
 use crate::shell::{Session, SessionEvent};
 use crate::terminal::TerminalView;
 
@@ -27,9 +30,32 @@ pub fn open_shell(parent: &impl IsA<gtk::Window>, sandbox: &str) {
         &format!("{sandbox} — Terminal"),
         None,
         |cols, rows| {
-            let command = GATEWAY_SHELL.iter().map(|s| s.to_string()).collect();
-            Session::gateway(sandbox.to_owned(), command, cols, rows)
+            let options = ExecOptions {
+                command: GATEWAY_SHELL.iter().map(|s| s.to_string()).collect(),
+                ..Default::default()
+            };
+            Session::gateway(sandbox.to_owned(), options, cols, rows)
         },
+    );
+}
+
+/// `agent` in `sandbox`, started in `workdir` (blank for the sandbox's own).
+pub fn open_agent(parent: &impl IsA<gtk::Window>, sandbox: &str, agent: &Agent, workdir: &str) {
+    let options = ExecOptions {
+        command: agent.command(),
+        workdir: workdir.to_owned(),
+        environment: agent
+            .environment
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+        ..Default::default()
+    };
+    open(
+        parent,
+        &format!("{sandbox} — {}", agent.name),
+        None,
+        |cols, rows| Session::gateway(sandbox.to_owned(), options, cols, rows),
     );
 }
 

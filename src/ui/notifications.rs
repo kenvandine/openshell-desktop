@@ -109,6 +109,7 @@ mod tests {
             rules: Vec::new(),
             prompts: Vec::new(),
             policy: None,
+            agent: None,
         }
     }
 

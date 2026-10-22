@@ -1,0 +1,19 @@
+[package]
+name = "openshell-agents"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Agent catalog and downloads for openshell-desktop"
+
+[dependencies]
+base64 = "0.22"
+flate2 = "1"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+tar = "0.4"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt", "macros"] }

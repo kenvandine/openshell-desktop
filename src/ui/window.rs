@@ -8,6 +8,7 @@ use super::accounts;
 use super::console;
 use super::detail::{self, SandboxAction};
 use super::dialogs;
+use super::new_agent::{self, Account, NewAgent};
 use super::notifications;
 use super::policy::{self, PolicyEdit};
 use super::preferences;
@@ -67,6 +68,9 @@ mod imp {
         /// Whether closing the window has already explained that the app
         /// keeps running.
         pub told_still_running: Cell<bool>,
+        /// Sandboxes created from New Agent that still need their folder
+        /// mounted and agent started once they are running.
+        pub pending_launch: RefCell<std::collections::HashMap<String, Option<std::path::PathBuf>>>,
     }
 
     #[glib::object_subclass]
@@ -323,6 +327,7 @@ impl Window {
                     }
                 }
                 self.replace_sandboxes(new);
+                self.launch_pending();
                 // An unchanged empty list leaves the "not running" page up.
                 if !was_connected && imp.sandboxes.borrow().is_empty() {
                     self.refresh_detail();
@@ -484,23 +489,172 @@ impl Window {
     }
 
     fn new_sandbox_dialog(&self) {
-        if !self.imp().connected.get() {
+        let imp = self.imp();
+        if !imp.connected.get() {
             self.toast("The OpenShell gateway is not running");
             return;
         }
-        dialogs::new_sandbox(
+        let (profiles, providers) = self.accounts();
+        let context = new_agent::Context {
+            profiles,
+            providers,
+            sandboxes: imp
+                .sandboxes
+                .borrow()
+                .iter()
+                .map(|s| s.name.clone())
+                .collect(),
+            gpu_supported: imp.gpu_supported.get(),
+        };
+        new_agent::present(
             self,
-            self.imp().gpu_supported.get(),
+            context,
             glib::clone!(
                 #[weak(rename_to = win)]
                 self,
-                move |name, options| {
-                    // Pulling images can take a while before the gateway answers.
-                    win.toast(&format!("Creating {name}…"));
-                    win.send(Command::Create { name, options })
-                }
+                move |request| win.create_agent(request)
             ),
         );
+    }
+
+    fn create_agent(&self, request: NewAgent) {
+        let NewAgent {
+            name,
+            agent,
+            account,
+            folder,
+            options,
+        } = request;
+        if let Account::New {
+            name: provider,
+            kind,
+            env_var,
+            key,
+        } = account
+        {
+            // Commands run in order, so the account exists before the sandbox.
+            self.send(Command::CreateProvider {
+                name: provider,
+                kind,
+                credentials: gateway::Credentials([(env_var, key)].into()),
+            });
+        }
+        if agent.is_some() || folder.is_some() {
+            self.imp()
+                .pending_launch
+                .borrow_mut()
+                .insert(name.clone(), folder);
+        }
+        // Pulling images can take a while before the gateway answers.
+        self.toast(&format!("Creating {name}…"));
+        self.send(Command::Create { name, options });
+    }
+
+    /// Mounts the project folder and starts the agent (or a shell) for each
+    /// sandbox from New Agent that has come up.
+    fn launch_pending(&self) {
+        let imp = self.imp();
+        let ready: Vec<(Sandbox, Option<std::path::PathBuf>)> = {
+            let mut pending = imp.pending_launch.borrow_mut();
+            imp.sandboxes
+                .borrow()
+                .iter()
+                .filter(|s| s.state == SandboxState::Running && !s.instance.is_empty())
+                .filter_map(|s| pending.remove(&s.name).map(|folder| (s.clone(), folder)))
+                .collect()
+        };
+        for (sandbox, folder) in ready {
+            let mut workdir = String::new();
+            if let Some(folder) = folder {
+                let disk = lxd::Disk {
+                    source: folder.to_string_lossy().into_owned(),
+                    path: new_agent::mount_path(&folder),
+                    readonly: false,
+                };
+                let device = lxd::mount_device_name(&disk.path);
+                match lxd::Client::default().add_disk(&sandbox.instance, &device, &disk) {
+                    Ok(()) => {
+                        workdir = disk.path;
+                        self.reload_lxd_details();
+                    }
+                    Err(error) => self.toast(&format!("Mounting {} failed: {error}", disk.source)),
+                }
+            }
+            match sandbox.agent.as_deref().and_then(openshell_agents::find) {
+                Some(agent) => self.run_agent(&sandbox, agent, &workdir),
+                None => console::open_shell(self, &sandbox.name),
+            }
+        }
+    }
+
+    /// Installs `agent` if the sandbox lacks it, then opens its terminal.
+    fn run_agent(&self, sandbox: &Sandbox, agent: &'static openshell_agents::Agent, workdir: &str) {
+        let events = crate::install::spawn(agent, sandbox.name.clone(), sandbox.instance.clone());
+        let progress = gtk::ProgressBar::builder().show_text(true).build();
+        let dialog = adw::AlertDialog::new(
+            Some(&format!("Installing {}", agent.name)),
+            Some(&format!(
+                "Downloading {} and copying it into {}.",
+                agent.name, sandbox.name
+            )),
+        );
+        dialog.add_response("close", "Close");
+        dialog.set_extra_child(Some(&progress));
+        let sandbox = sandbox.name.clone();
+        let workdir = workdir.to_owned();
+        glib::spawn_future_local(glib::clone!(
+            #[weak(rename_to = win)]
+            self,
+            async move {
+                use crate::install::InstallEvent;
+                let mut shown = false;
+                while let Ok(event) = events.recv().await {
+                    // Only show progress when there is something to wait for.
+                    if !shown && !matches!(event, InstallEvent::Done(_)) {
+                        dialog.present(Some(&win));
+                        shown = true;
+                    }
+                    match event {
+                        InstallEvent::Downloading(received, total) => {
+                            let mb = |b: u64| b as f64 / 1_048_576.0;
+                            match total {
+                                Some(total) if total > 0 => {
+                                    progress.set_fraction(received as f64 / total as f64);
+                                    progress.set_text(Some(&format!(
+                                        "{:.0} of {:.0} MB",
+                                        mb(received),
+                                        mb(total)
+                                    )));
+                                }
+                                _ => {
+                                    progress.pulse();
+                                    progress.set_text(Some(&format!("{:.0} MB", mb(received))));
+                                }
+                            }
+                        }
+                        InstallEvent::Copying => {
+                            progress.set_fraction(1.0);
+                            progress.set_text(Some(&format!("Copying into {sandbox}…")));
+                        }
+                        InstallEvent::Done(version) => {
+                            dialog.close();
+                            if let Some(version) = version {
+                                win.toast(&format!("Installed {} {version}", agent.name));
+                            }
+                            console::open_agent(&win, &sandbox, agent, &workdir);
+                        }
+                        InstallEvent::Failed(error) => {
+                            dialog.set_heading(Some(&format!("Couldn't Install {}", agent.name)));
+                            dialog.set_body(&error);
+                            progress.set_visible(false);
+                            if !shown {
+                                dialog.present(Some(&win));
+                            }
+                        }
+                    }
+                }
+            }
+        ));
     }
 
     /// Answers a blocked request from its desktop notification.
@@ -719,6 +873,19 @@ impl Window {
             // Everything else goes through the gateway.
             _ if !connected => self.toast("This needs the OpenShell gateway, which is not running"),
             SandboxAction::OpenTerminal => console::open_shell(self, &sandbox.name),
+            SandboxAction::OpenAgent => {
+                let Some(agent) = sandbox.agent.as_deref().and_then(openshell_agents::find) else {
+                    return;
+                };
+                // Start in the project folder, if one is mounted.
+                let workdir = sandbox
+                    .mounts
+                    .iter()
+                    .find(|m| m.sandbox.starts_with("/sandbox/"))
+                    .map(|m| m.sandbox.clone())
+                    .unwrap_or_default();
+                self.run_agent(&sandbox, agent, &workdir);
+            }
             SandboxAction::ToggleRunning => match sandbox.state {
                 SandboxState::Running => self.send(Command::Stop(sandbox.name)),
                 SandboxState::Stopped => self.send(Command::Start(sandbox.name)),

@@ -132,7 +132,12 @@ pub struct SandboxInfo {
     /// it is.
     pub detail: String,
     pub image: String,
+    /// The agent the app installed for it (`AGENT_LABEL`), if any.
+    pub agent: Option<String>,
 }
+
+/// Label naming the agent a sandbox was created for, by catalog id.
+pub const AGENT_LABEL: &str = "openshell-desktop/agent";
 
 impl SandboxInfo {
     pub fn from_proto(sandbox: &Sandbox) -> Self {
@@ -168,6 +173,7 @@ impl SandboxInfo {
                 .and_then(|s| s.template.as_ref())
                 .map(|t| t.image.clone())
                 .unwrap_or_default(),
+            agent: meta.and_then(|m| m.labels.get(AGENT_LABEL)).cloned(),
         }
     }
 }
@@ -298,6 +304,7 @@ pub struct CreateOptions {
     /// The sandbox's main process; empty leaves the gateway's login shell.
     pub command: Vec<String>,
     pub environment: Vec<(String, String)>,
+    pub labels: Vec<(String, String)>,
 }
 
 impl CreateOptions {
@@ -614,6 +621,7 @@ impl Gateway {
                 workspace_scope: workspace(),
                 name: name.into(),
                 spec: Some(spec),
+                labels: options.labels.iter().cloned().collect(),
                 ..Default::default()
             })
             .await?
@@ -629,6 +637,11 @@ impl Gateway {
                 phase: "provisioning".into(),
                 detail: String::new(),
                 image: options.image.clone(),
+                agent: options
+                    .labels
+                    .iter()
+                    .find(|(key, _)| key == AGENT_LABEL)
+                    .map(|(_, value)| value.clone()),
             }))
     }
 
