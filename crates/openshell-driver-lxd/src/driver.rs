@@ -527,7 +527,7 @@ impl LxdDriver {
                     ],
                     &identity,
                     "/",
-                    &[],
+                    &[WORKLOAD_SYSCTL.to_owned()],
                 )?,
             ),
             (KEY_UID.to_owned(), identity.uid.to_string()),
@@ -1544,6 +1544,11 @@ impl Names {
         }
     }
 }
+
+/// The runtime's DNS relay binds 127.0.0.53:53 without capabilities, as
+/// OpenShell's Docker and Kubernetes drivers allow. The workload's network
+/// namespace has no NIC, so this opens nothing beyond its loopback.
+const WORKLOAD_SYSCTL: &str = "lxc.sysctl.net.ipv4.ip_unprivileged_port_start = 0";
 
 /// The supervisor's address on its bridge, which liblxc configures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

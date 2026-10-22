@@ -597,6 +597,7 @@ async fn provisions_a_workload_and_supervisor_pair() {
     );
     assert!(raw.contains("lxc.init.uid = 1000") && raw.contains("lxc.no_new_privs = 1"));
     assert!(!raw.contains("lxc.net"), "{raw}");
+    assert!(raw.contains("lxc.sysctl.net.ipv4.ip_unprivileged_port_start = 0"));
     assert!(
         !workload
             .config
