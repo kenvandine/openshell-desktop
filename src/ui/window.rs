@@ -4,6 +4,7 @@ use adw::prelude::*;
 use adw::subclass::prelude::*;
 use gtk::{gio, glib};
 
+use super::accounts;
 use super::console;
 use super::detail::{self, SandboxAction};
 use super::dialogs;
@@ -49,6 +50,16 @@ mod imp {
         pub gpu_supported: Cell<bool>,
         /// Why the gateway is unreachable, for the status tooltip.
         pub gateway_error: RefCell<String>,
+        /// Provider types and stored providers, from the gateway.
+        pub profiles: RefCell<Vec<openshell_gateway_client::ProfileInfo>>,
+        pub providers: RefCell<Vec<openshell_gateway_client::ProviderInfo>>,
+        /// The open Preferences dialog's account list, kept current.
+        pub accounts_list: RefCell<
+            Option<(
+                glib::WeakRef<adw::PreferencesDialog>,
+                glib::WeakRef<gtk::ListBox>,
+            )>,
+        >,
     }
 
     #[glib::object_subclass]
@@ -101,7 +112,13 @@ impl Window {
             .build();
         let preferences = gio::ActionEntry::builder("preferences")
             .activate(|win: &Self, _, _| {
-                preferences::dialog(&win.gateway_status()).present(Some(win))
+                let dialog = preferences::dialog(&win.gateway_status());
+                let (page, list) = accounts::page(win, &dialog);
+                dialog.add(&page);
+                win.imp()
+                    .accounts_list
+                    .replace(Some((dialog.downgrade(), list.downgrade())));
+                dialog.present(Some(win))
             })
             .build();
         self.add_action_entries([new_sandbox, preferences]);
@@ -140,7 +157,38 @@ impl Window {
         ));
     }
 
-    fn send(&self, command: Command) {
+    pub fn is_connected(&self) -> bool {
+        self.imp().connected.get()
+    }
+
+    /// What the gateway last said about provider types and stored providers.
+    pub fn accounts(
+        &self,
+    ) -> (
+        Vec<openshell_gateway_client::ProfileInfo>,
+        Vec<openshell_gateway_client::ProviderInfo>,
+    ) {
+        let imp = self.imp();
+        (
+            imp.profiles.borrow().clone(),
+            imp.providers.borrow().clone(),
+        )
+    }
+
+    /// Refills the account list if Preferences is open.
+    fn refresh_accounts(&self) {
+        let open = self
+            .imp()
+            .accounts_list
+            .borrow()
+            .as_ref()
+            .and_then(|(dialog, list)| Some((dialog.upgrade()?, list.upgrade()?)));
+        if let Some((dialog, list)) = open {
+            accounts::fill(&list, self, &dialog);
+        }
+    }
+
+    pub fn send(&self, command: Command) {
         if let Some(commands) = self.imp().commands.borrow().as_ref() {
             let _ = commands.try_send(command);
         }
@@ -169,6 +217,9 @@ impl Window {
             }
             Event::Unavailable(reason) => {
                 let was_connected = imp.connected.replace(false);
+                if was_connected {
+                    self.refresh_accounts();
+                }
                 let changed = *imp.gateway_error.borrow() != reason;
                 imp.gateway_error.replace(reason);
                 if was_connected {
@@ -217,6 +268,14 @@ impl Window {
                 self.show_toast(toast);
             }
             Event::GpuSupported(gpu) => imp.gpu_supported.set(gpu),
+            Event::Accounts {
+                profiles,
+                providers,
+            } => {
+                imp.profiles.replace(profiles);
+                imp.providers.replace(providers);
+                self.refresh_accounts();
+            }
         }
         self.update_status();
     }

@@ -4,11 +4,25 @@
 //! runtime, polls the sandbox list and executes commands; the window sends
 //! `Command`s in and receives `Event`s on the GTK main loop.
 
+use std::collections::BTreeMap;
+use std::fmt;
 use std::time::Duration;
 
-use openshell_gateway_client::{Config, CreateOptions, Error, Gateway, Proposal, Snapshot};
+use openshell_gateway_client::{
+    Config, CreateOptions, Error, Gateway, ProfileInfo, Proposal, ProviderInfo, Snapshot,
+};
 
 const POLL: Duration = Duration::from_secs(3);
+
+/// Credential values by env var name. Debug output names only the keys.
+#[derive(Clone)]
+pub struct Credentials(pub BTreeMap<String, String>);
+
+impl fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_set().entries(self.0.keys()).finish()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum Command {
@@ -46,6 +60,13 @@ pub enum Command {
         sandbox: String,
         rule: String,
     },
+    /// Store credentials as provider `name` of profile `kind`.
+    CreateProvider {
+        name: String,
+        kind: String,
+        credentials: Credentials,
+    },
+    DeleteProvider(String),
 }
 
 impl Command {
@@ -64,6 +85,8 @@ impl Command {
             Command::AddRule { host, port, .. } => format!("Allowing {host}:{port}"),
             Command::RemoveEndpoint { host, port, .. } => format!("Removing {host}:{port}"),
             Command::RemoveRule { rule, .. } => format!("Removing rule {rule}"),
+            Command::CreateProvider { name, .. } => format!("Adding account {name}"),
+            Command::DeleteProvider(name) => format!("Removing account {name}"),
         })
     }
 }
@@ -80,6 +103,12 @@ pub enum Event {
     Failed(String),
     /// Whether new sandboxes can ask for a GPU; sent on each connect.
     GpuSupported(bool),
+    /// Provider types and stored providers; sent on connect and whenever an
+    /// account is added or removed.
+    Accounts {
+        profiles: Vec<ProfileInfo>,
+        providers: Vec<ProviderInfo>,
+    },
 }
 
 pub struct Handle {
@@ -136,6 +165,19 @@ async fn run(commands: async_channel::Receiver<Command>, events: async_channel::
                             return;
                         }
                     }
+                    match accounts(&mut connected).await {
+                        Ok(event) => {
+                            if events.send(event).await.is_err() {
+                                return;
+                            }
+                        }
+                        Err(error) => {
+                            let failed = Event::Failed(format!("Listing accounts failed: {error}"));
+                            if events.send(failed).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
                     gateway = Some(connected);
                 }
                 Err(error) => {
@@ -159,8 +201,20 @@ async fn run(commands: async_channel::Receiver<Command>, events: async_channel::
                     sent.push(Event::Done(message));
                 }
                 // A command changes what the list shows, so follow it with one.
-                match client.snapshot().await {
-                    Ok(list) => sent.push(Event::Sandboxes(list)),
+                let refreshed = if outcome.accounts_changed {
+                    accounts(client).await.map(Some)
+                } else {
+                    Ok(None)
+                };
+                let refreshed = match refreshed {
+                    Ok(accounts) => client.snapshot().await.map(|list| (accounts, list)),
+                    Err(error) => Err(error),
+                };
+                match refreshed {
+                    Ok((accounts, list)) => {
+                        sent.extend(accounts);
+                        sent.push(Event::Sandboxes(list));
+                    }
                     Err(error) => sent.push(failure(&mut gateway, error)),
                 }
                 sent
@@ -223,9 +277,20 @@ fn is_connection_error(status: &openshell_gateway_client::Status) -> bool {
 
 struct Outcome {
     message: Option<String>,
+    accounts_changed: bool,
+}
+
+async fn accounts(gateway: &mut Gateway) -> Result<Event, Error> {
+    let profiles = gateway.profiles().await?;
+    let providers = gateway.providers().await?;
+    Ok(Event::Accounts {
+        profiles: profiles.iter().map(ProfileInfo::from_proto).collect(),
+        providers,
+    })
 }
 
 async fn execute(gateway: &mut Gateway, command: Command) -> Result<Outcome, Error> {
+    let mut accounts_changed = false;
     let message = match command {
         Command::Refresh => None,
         Command::Create { name, options } => {
@@ -278,6 +343,23 @@ async fn execute(gateway: &mut Gateway, command: Command) -> Result<Outcome, Err
             let version = gateway.remove_rule(&sandbox, &rule).await?;
             Some(format!("Removed rule {rule} (policy version {version})"))
         }
+        Command::CreateProvider {
+            name,
+            kind,
+            credentials,
+        } => {
+            gateway.create_provider(&name, &kind, credentials.0).await?;
+            accounts_changed = true;
+            Some(format!("Added account {name}"))
+        }
+        Command::DeleteProvider(name) => {
+            gateway.delete_provider(&name).await?;
+            accounts_changed = true;
+            Some(format!("Removed account {name}"))
+        }
     };
-    Ok(Outcome { message })
+    Ok(Outcome {
+        message,
+        accounts_changed,
+    })
 }

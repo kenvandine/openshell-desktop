@@ -70,6 +70,12 @@ pub struct ProfileInfo {
 }
 
 impl ProfileInfo {
+    /// Whether one pasted key is all it needs. Profiles that want several
+    /// values, such as Codex's sign-in tokens, need a sign-in flow instead.
+    pub fn takes_single_key(&self) -> bool {
+        self.credentials.iter().filter(|c| c.required).count() <= 1 && !self.credentials.is_empty()
+    }
+
     pub fn from_proto(profile: &ProviderProfile) -> Self {
         let mut hosts: Vec<String> = Vec::new();
         for endpoint in &profile.endpoints {
@@ -307,5 +313,18 @@ mod tests {
         assert_eq!(info.display_name, "GitHub");
         assert_eq!(info.credentials[0].env_vars, ["GITHUB_TOKEN", "GH_TOKEN"]);
         assert_eq!(info.hosts, ["api.github.com", "github.com"]);
+    }
+
+    #[test]
+    fn only_single_key_profiles_can_be_pasted() {
+        let single: Vec<String> = bundled_profiles()
+            .iter()
+            .map(ProfileInfo::from_proto)
+            .filter(ProfileInfo::takes_single_key)
+            .map(|p| p.id)
+            .collect();
+        assert!(single.contains(&"claude-code".to_owned()));
+        assert!(single.contains(&"github".to_owned()));
+        assert!(!single.contains(&"codex".to_owned()));
     }
 }
