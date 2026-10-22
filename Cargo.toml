@@ -6,7 +6,17 @@ license = "Apache-2.0"
 description = "GNOME desktop manager for NVIDIA OpenShell sandboxes on LXD / MicroCloud"
 repository = "https://github.com/kenvandine/openshell-desktop"
 
+[workspace]
+members = ["crates/openshell-lxd"]
+
 [dependencies]
 # Feature floors match Ubuntu 24.04 / core24 (GTK 4.14, libadwaita 1.5).
 adw = { package = "libadwaita", version = "0.9", features = ["v1_5"] }
 gtk = { package = "gtk4", version = "0.11", features = ["v4_14"] }
+async-channel = "2"
+openshell-lxd = { path = "crates/openshell-lxd" }
+pangocairo = "0.22"
+
+[build-dependencies]
+bindgen = "0.73"
+pkg-config = "0.3"

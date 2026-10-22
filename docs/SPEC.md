@@ -158,6 +158,9 @@ The UI adheres to the GNOME HIG using Libadwaita.
 - Connect to OpenShell's local management socket and the LXD daemon over
   `/var/snap/lxd/common/lxd/unix.socket`.
 - Implement the visual policy editor and profile templates.
+- Debug console: LXD REST exec + websockets (no `lxc` binary, so it works in a
+  strict snap), drawn by a GTK widget on libghostty-vt. A policy-enforced
+  terminal will use OpenShell's gateway sessions instead.
 
 ### Phase 3: Desktop Notifications & Policy Advisor Daemon
 

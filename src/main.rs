@@ -1,5 +1,5 @@
-mod backend;
 mod model;
+mod terminal;
 mod ui;
 
 use adw::prelude::*;

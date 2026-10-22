@@ -63,9 +63,9 @@ fn status_group(sandbox: &Sandbox, window: &Window) -> adw::PreferencesGroup {
 
     let running = sandbox.state == SandboxState::Running;
     let status = if running {
-        "Running (LXD Container)"
+        format!("Running (LXD {})", sandbox.instance_type)
     } else {
-        "Stopped"
+        "Stopped".to_owned()
     };
     group.add(
         &adw::ActionRow::builder()
@@ -75,19 +75,26 @@ fn status_group(sandbox: &Sandbox, window: &Window) -> adw::PreferencesGroup {
     );
 
     if running {
-        let usage = adw::ActionRow::builder()
-            .title(format!("Uptime: {}m", sandbox.uptime_mins))
-            .subtitle(format!(
+        let memory = if sandbox.memory_limit_mb > 0 {
+            format!(
                 "Memory: {} / {}",
                 format_mb(sandbox.memory_used_mb),
                 format_mb(sandbox.memory_limit_mb)
-            ))
-            .build();
-        let level = gtk::LevelBar::for_interval(0.0, sandbox.memory_limit_mb as f64);
-        level.set_value(sandbox.memory_used_mb as f64);
-        level.set_valign(gtk::Align::Center);
-        level.set_width_request(160);
-        usage.add_suffix(&level);
+            )
+        } else {
+            format!("Memory: {}", format_mb(sandbox.memory_used_mb))
+        };
+        let usage = adw::ActionRow::builder().title(memory).build();
+        if let Some(mins) = sandbox.uptime_mins {
+            usage.set_subtitle(&format!("Uptime: {mins}m"));
+        }
+        if sandbox.memory_limit_mb > 0 {
+            let level = gtk::LevelBar::for_interval(0.0, sandbox.memory_limit_mb as f64);
+            level.set_value(sandbox.memory_used_mb as f64);
+            level.set_valign(gtk::Align::Center);
+            level.set_width_request(160);
+            usage.add_suffix(&level);
+        }
         group.add(&usage);
     }
 

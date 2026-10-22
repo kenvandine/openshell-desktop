@@ -4,10 +4,11 @@ use adw::prelude::*;
 use adw::subclass::prelude::*;
 use gtk::{gio, glib};
 
+use super::console;
 use super::detail::{self, SandboxAction};
 use super::sidebar;
-use crate::backend::lxd::{self, LxdStatus};
 use crate::model::{NetworkRule, Sandbox, SandboxState, sample_sandboxes};
+use openshell_lxd::{self as lxd, LxdStatus};
 
 mod imp {
     use super::*;
@@ -28,6 +29,8 @@ mod imp {
 
         pub sandboxes: RefCell<Vec<Sandbox>>,
         pub selected: Cell<usize>,
+        /// Whether the sandboxes are live LXD instances rather than samples.
+        pub live: Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -51,7 +54,7 @@ mod imp {
             let obj = self.obj();
             obj.setup_actions();
             obj.setup_sidebar();
-            obj.update_status(&lxd::probe());
+            obj.update_status(&lxd::Client::default().status());
         }
     }
 
@@ -85,7 +88,16 @@ impl Window {
 
     fn setup_sidebar(&self) {
         let imp = self.imp();
-        imp.sandboxes.replace(sample_sandboxes());
+        let live: Vec<Sandbox> = lxd::Client::default()
+            .instances()
+            .map(|instances| instances.iter().map(Sandbox::from_instance).collect())
+            .unwrap_or_default();
+        imp.live.set(!live.is_empty());
+        imp.sandboxes.replace(if live.is_empty() {
+            sample_sandboxes()
+        } else {
+            live
+        });
         imp.sidebar_list.connect_row_selected(glib::clone!(
             #[weak(rename_to = win)]
             self,
@@ -113,8 +125,13 @@ impl Window {
                 format!("LXD unreachable: {reason}")
             }
         };
+        let source = if self.imp().live.get() {
+            "Sandbox list shows LXD instances"
+        } else {
+            "Sandbox list shows sample data"
+        };
         label.set_tooltip_text(Some(&format!(
-            "{lxd}\nOpenShell gateway: not connected yet\nSandbox list shows sample data"
+            "{lxd}\nOpenShell gateway: not connected yet\n{source}"
         )));
         let (add, remove) = if status.is_active() {
             ("active", "inactive")
@@ -171,8 +188,9 @@ impl Window {
                 SandboxAction::IgnorePrompt(i) => {
                     sandbox.prompts.remove(i);
                 }
+                SandboxAction::OpenTerminal if imp.live.get() => console::open(self, &sandbox.name),
                 SandboxAction::OpenTerminal => {
-                    message = Some("Terminal is not wired up yet".into())
+                    message = Some("The console needs LXD; this is sample data".into())
                 }
                 SandboxAction::PolicyRules => {
                     message = Some("Policy editor is not wired up yet".into())

@@ -1,6 +1,9 @@
 //! View-model types for sandboxes and their policies.
 //!
-//! The data here is sample data until the app talks to the OpenShell gateway.
+//! Sandboxes come from live LXD instances when LXD is reachable, otherwise
+//! from sample data, until the app talks to the OpenShell gateway.
+
+use openshell_lxd::{Instance, parse_memory_mb};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxState {
@@ -54,7 +57,9 @@ pub struct Sandbox {
     pub runtime: String,
     pub profile: String,
     pub state: SandboxState,
-    pub uptime_mins: u32,
+    /// "Container" or "Virtual Machine".
+    pub instance_type: String,
+    pub uptime_mins: Option<u32>,
     pub memory_used_mb: u32,
     pub memory_limit_mb: u32,
     pub cpu_limit: u32,
@@ -71,6 +76,71 @@ impl Sandbox {
                 format!("{} · {}", self.runtime, format_mb(self.memory_used_mb))
             }
             SandboxState::Stopped => format!("{} · Stopped", self.runtime),
+        }
+    }
+}
+
+impl Sandbox {
+    /// A sandbox view of a live LXD instance. Policy fields stay empty until
+    /// the OpenShell gateway provides them.
+    pub fn from_instance(instance: &Instance) -> Self {
+        let config = |key: &str| instance.expanded_config.get(key).map(String::as_str);
+        let mounts = instance
+            .expanded_devices
+            .values()
+            .filter(|d| d.get("type").map(String::as_str) == Some("disk"))
+            .filter_map(|d| {
+                Some(Mount {
+                    host: d.get("source")?.clone(),
+                    sandbox: d.get("path")?.clone(),
+                    access: if d.get("readonly").map(String::as_str) == Some("true") {
+                        Access::ReadOnly
+                    } else {
+                        Access::ReadWrite
+                    },
+                })
+            })
+            .collect();
+
+        Sandbox {
+            name: instance.name.clone(),
+            runtime: if instance.kind == "virtual-machine" {
+                "VM"
+            } else {
+                "Container"
+            }
+            .into(),
+            profile: instance.profiles.join(", "),
+            state: if instance.status == "Running" {
+                SandboxState::Running
+            } else {
+                SandboxState::Stopped
+            },
+            instance_type: if instance.kind == "virtual-machine" {
+                "Virtual Machine"
+            } else {
+                "Container"
+            }
+            .into(),
+            uptime_mins: None,
+            memory_used_mb: instance
+                .state
+                .as_ref()
+                .and_then(|s| s.memory.as_ref())
+                .map_or(0, |m| (m.usage / (1024 * 1024)) as u32),
+            memory_limit_mb: config("limits.memory")
+                .and_then(parse_memory_mb)
+                .unwrap_or(0),
+            cpu_limit: config("limits.cpu")
+                .and_then(|c| c.parse().ok())
+                .unwrap_or(0),
+            gpu_passthrough: instance
+                .expanded_devices
+                .values()
+                .any(|d| d.get("type").map(String::as_str) == Some("gpu")),
+            mounts,
+            rules: vec![],
+            prompts: vec![],
         }
     }
 }
@@ -105,7 +175,8 @@ pub fn sample_sandboxes() -> Vec<Sandbox> {
             runtime: "Python".into(),
             profile: "Code Assistant".into(),
             state: SandboxState::Running,
-            uptime_mins: 24,
+            instance_type: "Container".into(),
+            uptime_mins: Some(24),
             memory_used_mb: 840,
             memory_limit_mb: 4096,
             cpu_limit: 4,
@@ -132,7 +203,8 @@ pub fn sample_sandboxes() -> Vec<Sandbox> {
             runtime: "Node".into(),
             profile: "Web Researcher".into(),
             state: SandboxState::Stopped,
-            uptime_mins: 0,
+            instance_type: "Container".into(),
+            uptime_mins: None,
             memory_used_mb: 0,
             memory_limit_mb: 2048,
             cpu_limit: 2,
@@ -146,7 +218,8 @@ pub fn sample_sandboxes() -> Vec<Sandbox> {
             runtime: "Rust".into(),
             profile: "Fully Offline".into(),
             state: SandboxState::Running,
-            uptime_mins: 132,
+            instance_type: "Container".into(),
+            uptime_mins: Some(132),
             memory_used_mb: 512,
             memory_limit_mb: 8192,
             cpu_limit: 8,
