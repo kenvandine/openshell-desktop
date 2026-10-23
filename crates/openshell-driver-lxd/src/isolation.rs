@@ -36,6 +36,12 @@ pub const AUTH_BUNDLE_PATH: &str = "/.openshell/supervisor/auth.json";
 pub const RESTART_METADATA_PATH: &str = "/.openshell/supervisor/restart-metadata.json";
 const CONTROL_SOCKET: &str = "/.openshell/channel/shared/control/control.sock";
 const SANDBOX_DIR: &str = "/.openshell/channel/sandbox";
+/// The workload has no network; the sandbox runtime answers DNS on this
+/// loopback address and relays it to the supervisor. Programs that read
+/// resolv.conf themselves, such as static musl builds, only find the relay
+/// through this file, as with the Docker and Podman drivers. Without a
+/// nameserver line musl asks 127.0.0.1, which the runtime refuses.
+const WORKLOAD_RESOLV_CONF: &[u8] = b"nameserver 127.0.0.53\n";
 
 pub const ROLE_WORKLOAD: &str = "workload";
 pub const ROLE_SUPERVISOR: &str = "supervisor";
@@ -225,6 +231,15 @@ pub fn bootstrap(input: BootstrapInput<'_>) -> Result<Bootstrap, DriverError> {
     };
     let secret = owned_dir(0o600);
     let workload = vec![
+        Entry::file(
+            "/etc/resolv.conf",
+            WORKLOAD_RESOLV_CONF.to_vec(),
+            FileMeta {
+                uid: 0,
+                gid: 0,
+                mode: 0o644,
+            },
+        ),
         Entry::dir("/.openshell", ROOT_DIR),
         Entry::dir(CHANNEL_ROOT, ROOT_DIR),
         Entry::dir(SANDBOX_DIR, owned_dir(0o711)),
