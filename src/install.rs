@@ -6,7 +6,7 @@
 //! the workload's root filesystem through LXD, at the path OpenShell's
 //! provider profile for that agent allows.
 
-use openshell_agents::{Agent, Arch};
+use openshell_agents::{Agent, Arch, Step};
 use openshell_gateway_client::{Config, Gateway};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -54,14 +54,18 @@ async fn install(
     let mut gateway = Gateway::connect(&Config::discover())
         .await
         .map_err(|e| e.to_string())?;
-    let check = vec!["test".into(), "-x".into(), agent.install_path.into()];
-    if matches!(gateway.exec_status(sandbox, check).await, Ok(0)) {
-        return Ok(None);
-    }
-
     let arch = Arch::host().ok_or_else(|| {
         openshell_agents::Error::UnsupportedArch(std::env::consts::ARCH.into()).to_string()
     })?;
+    if matches!(
+        gateway
+            .exec_status(sandbox, agent.installed_check(arch))
+            .await,
+        Ok(0)
+    ) {
+        return Ok(None);
+    }
+
     let cache = gtk::glib::user_cache_dir()
         .join("openshell-desktop")
         .join("agents");
@@ -75,15 +79,38 @@ async fn install(
     })
     .await
     .map_err(|e| e.to_string())?;
+    let steps = download.plan(agent, arch).map_err(|e| e.to_string())?;
 
     let _ = events.send(InstallEvent::Copying).await;
-    let path = download.path.clone();
-    let size = download.size;
     let instance = instance.to_owned();
-    let target = agent.install_path;
     tokio::task::spawn_blocking(move || {
-        let mut file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
-        openshell_lxd::Client::default().push_file(&instance, target, 0o755, &mut file, size)
+        let lxd = openshell_lxd::Client::default();
+        for step in steps {
+            match step {
+                Step::Dir(path) => lxd.make_dir(&instance, &path, 0o755)?,
+                Step::File {
+                    source,
+                    target,
+                    mode,
+                    size,
+                } => {
+                    let mut file = std::fs::File::open(&source).map_err(|e| e.to_string())?;
+                    lxd.push_file(&instance, &target, mode, &mut file, size)?
+                }
+                Step::Text {
+                    target,
+                    mode,
+                    content,
+                } => lxd.push_file(
+                    &instance,
+                    &target,
+                    mode,
+                    &mut content.as_bytes(),
+                    content.len() as u64,
+                )?,
+            }
+        }
+        Ok::<_, String>(())
     })
     .await
     .map_err(|e| e.to_string())??;

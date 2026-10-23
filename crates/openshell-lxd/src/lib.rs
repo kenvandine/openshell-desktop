@@ -319,6 +319,32 @@ impl Client {
         content: &mut impl Read,
         len: u64,
     ) -> Result<(), String> {
+        self.post_file(instance, path, "file", mode, content, len)
+    }
+
+    /// Makes directory `path` in `instance`, owned by root with `mode`,
+    /// unless it is there already. Its parent must exist.
+    pub fn make_dir(&self, instance: &str, path: &str, mode: u32) -> Result<(), String> {
+        // LXD lists a directory that exists, and refuses to make it again.
+        let files = format!(
+            "/1.0/instances/{instance}/files?path={}",
+            query_escape(path)
+        );
+        if self.request("GET", &files, None).is_ok() {
+            return Ok(());
+        }
+        self.post_file(instance, path, "directory", mode, &mut std::io::empty(), 0)
+    }
+
+    fn post_file(
+        &self,
+        instance: &str,
+        path: &str,
+        kind: &str,
+        mode: u32,
+        content: &mut impl Read,
+        len: u64,
+    ) -> Result<(), String> {
         let mut stream = self.connect()?;
         // LXD answers once it has stored the whole file.
         stream
@@ -327,7 +353,7 @@ impl Client {
         let head = format!(
             "POST /1.0/instances/{instance}/files?path={} HTTP/1.0\r\nHost: lxd\r\n\
              Content-Type: application/octet-stream\r\nContent-Length: {len}\r\n\
-             X-LXD-type: file\r\nX-LXD-uid: 0\r\nX-LXD-gid: 0\r\n\
+             X-LXD-type: {kind}\r\nX-LXD-uid: 0\r\nX-LXD-gid: 0\r\n\
              X-LXD-mode: {mode:04o}\r\nX-LXD-write: overwrite\r\n\r\n",
             query_escape(path)
         );
