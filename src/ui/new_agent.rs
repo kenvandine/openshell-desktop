@@ -13,7 +13,8 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::{gio, glib};
-use openshell_agents::Agent;
+use openshell_agents::{Agent, Launch};
+use openshell_gateway_client::codex::CodexTokens;
 use openshell_gateway_client::{AGENT_LABEL, CreateOptions, ProfileInfo, ProviderInfo};
 
 use super::dialogs;
@@ -30,13 +31,20 @@ pub enum Account {
         env_var: String,
         key: String,
     },
+    /// Store this Codex sign-in as a new provider first.
+    Codex {
+        name: String,
+        tokens: CodexTokens,
+    },
 }
 
 impl Account {
     fn provider(&self) -> Option<&str> {
         match self {
             Account::None => None,
-            Account::Existing(name) | Account::New { name, .. } => Some(name),
+            Account::Existing(name) | Account::New { name, .. } | Account::Codex { name, .. } => {
+                Some(name)
+            }
         }
     }
 }
@@ -167,6 +175,10 @@ fn sign_in(
         project(nav, dialog, context, Some(agent), Account::None, done);
         return;
     };
+    if agent.launch == Launch::CodexSignIn {
+        codex_sign_in(nav, dialog, context, agent, &profile, done);
+        return;
+    }
     let existing: Vec<&ProviderInfo> = context
         .providers
         .iter()
@@ -294,6 +306,193 @@ fn sign_in(
         &page,
         Some(&continue_button),
     ));
+}
+
+/// Codex's second page: a saved account, or a sign-in imported from Codex
+/// on this computer. Codex signs in with ChatGPT, so there is no key to paste.
+fn codex_sign_in(
+    nav: &adw::NavigationView,
+    dialog: &adw::Dialog,
+    context: &Rc<Context>,
+    agent: &'static Agent,
+    profile: &ProfileInfo,
+    done: Rc<dyn Fn(NewAgent)>,
+) {
+    let group = adw::PreferencesGroup::builder()
+        .description(
+            "Codex uses your ChatGPT account. Sign in with \"codex login\" on this \
+             computer, then import that sign-in here. The OpenShell gateway keeps the \
+             tokens and renews them; Codex in the sandbox only gets stand-ins that \
+             work for OpenAI's servers.",
+        )
+        .build();
+    let next = gtk::Button::builder()
+        .label("Next")
+        .css_classes(["suggested-action"])
+        .sensitive(false)
+        .build();
+
+    // The chosen saved account, or the imported sign-in.
+    let saved: Rc<RefCell<Option<String>>> = Rc::default();
+    let imported: Rc<RefCell<Option<CodexTokens>>> = Rc::default();
+    let import_check = gtk::CheckButton::new();
+    let accounts: Vec<&ProviderInfo> = context
+        .providers
+        .iter()
+        .filter(|p| p.kind == profile.id)
+        .collect();
+    for (i, provider) in accounts.iter().enumerate() {
+        let check = gtk::CheckButton::new();
+        check.set_group(Some(&import_check));
+        let row = adw::ActionRow::builder()
+            .title(&provider.name)
+            .subtitle("Saved account")
+            .activatable_widget(&check)
+            .use_markup(false)
+            .build();
+        row.add_prefix(&check);
+        let name = provider.name.clone();
+        check.connect_toggled(glib::clone!(
+            #[strong]
+            saved,
+            #[weak]
+            next,
+            move |check| {
+                if check.is_active() {
+                    saved.replace(Some(name.clone()));
+                    next.set_sensitive(true);
+                }
+            }
+        ));
+        if i == 0 {
+            check.set_active(true);
+        }
+        group.add(&row);
+    }
+
+    let import = adw::ActionRow::builder()
+        .title("Import Sign-In")
+        .subtitle("Choose the auth.json file in the .codex folder in your home folder")
+        .use_markup(false)
+        .build();
+    let choose = gtk::Button::builder()
+        .label("Choose…")
+        .valign(gtk::Align::Center)
+        .build();
+    import.add_suffix(&choose);
+    if !accounts.is_empty() {
+        import.add_prefix(&import_check);
+        import.set_activatable_widget(Some(&import_check));
+    }
+    import_check.connect_toggled(glib::clone!(
+        #[strong]
+        saved,
+        #[strong]
+        imported,
+        #[weak]
+        next,
+        move |check| {
+            if check.is_active() {
+                saved.replace(None);
+                next.set_sensitive(imported.borrow().is_some());
+            }
+        }
+    ));
+    choose.connect_clicked(glib::clone!(
+        #[weak]
+        dialog,
+        #[weak]
+        import,
+        #[weak]
+        import_check,
+        #[weak]
+        next,
+        #[strong]
+        imported,
+        move |_| {
+            let chooser = gtk::FileDialog::builder()
+                .title("Import Codex Sign-In")
+                .modal(true)
+                .initial_file(&gio::File::for_path(codex_auth_file()))
+                .build();
+            let window = dialog.root().and_downcast::<gtk::Window>();
+            let imported = imported.clone();
+            chooser.open(window.as_ref(), gio::Cancellable::NONE, move |result| {
+                let Ok(file) = result else {
+                    return;
+                };
+                let read = file
+                    .load_contents(gio::Cancellable::NONE)
+                    .map_err(|e| e.message().to_owned())
+                    .and_then(|(bytes, _)| {
+                        CodexTokens::from_auth_json(&String::from_utf8_lossy(&bytes))
+                    });
+                match read {
+                    Ok(tokens) => {
+                        import.set_subtitle(&format!(
+                            "Imported the ChatGPT sign-in for account {}",
+                            tokens.account_id
+                        ));
+                        import.remove_css_class("error");
+                        imported.replace(Some(tokens));
+                        import_check.set_active(true);
+                        next.set_sensitive(true);
+                    }
+                    Err(error) => {
+                        import.set_subtitle(&error);
+                        import.add_css_class("error");
+                    }
+                }
+            });
+        }
+    ));
+    group.add(&import);
+
+    let note = adw::PreferencesGroup::builder()
+        .description(
+            "When the gateway renews the tokens, OpenAI may sign Codex out on this \
+             computer. If that happens, run \"codex login\" there again.",
+        )
+        .build();
+
+    let kind = profile.id.clone();
+    next.connect_clicked(glib::clone!(
+        #[weak]
+        nav,
+        #[weak]
+        dialog,
+        #[strong]
+        context,
+        move |_| {
+            let account = match (saved.borrow().clone(), imported.borrow().clone()) {
+                (Some(name), _) => Account::Existing(name),
+                (None, Some(tokens)) => Account::Codex {
+                    name: unique(&kind, |n| context.providers.iter().any(|p| p.name == n)),
+                    tokens,
+                },
+                (None, None) => return,
+            };
+            project(&nav, &dialog, &context, Some(agent), account, done.clone());
+        }
+    ));
+
+    let page = adw::PreferencesPage::new();
+    page.add(&group);
+    page.add(&note);
+    nav.push(&navigation_page(
+        &format!("Sign In to {}", profile.display_name),
+        &page,
+        Some(&next),
+    ));
+}
+
+/// Where `codex login` keeps its sign-in. A strict snap's `HOME` is its own
+/// data folder, so prefer the user's real one.
+fn codex_auth_file() -> PathBuf {
+    let home = std::env::var_os("SNAP_REAL_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(glib::home_dir);
+    home.join(".codex").join("auth.json")
 }
 
 /// Last page: the project folder, a name, and resources.

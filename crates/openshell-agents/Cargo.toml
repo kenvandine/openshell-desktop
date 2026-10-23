@@ -15,5 +15,6 @@ tar = "0.4"
 thiserror = "2"
 
 [dev-dependencies]
+serde_json = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros"] }

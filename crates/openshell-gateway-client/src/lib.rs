@@ -21,6 +21,7 @@ use openshell_core::proto::{
 };
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 
+pub mod codex;
 mod exec;
 mod providers;
 

@@ -10,6 +10,8 @@ description = "Client for the OpenShell gateway API used by openshell-desktop"
 openshell-core = { git = "https://github.com/NVIDIA/OpenShell", rev = "39d95b42cb403d883e2f545a3861131ccd3d2ebf", default-features = false }
 openshell-providers = { git = "https://github.com/NVIDIA/OpenShell", rev = "39d95b42cb403d883e2f545a3861131ccd3d2ebf" }
 prost-types = "0.14"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["sync"] }
 tokio-stream = "0.1"

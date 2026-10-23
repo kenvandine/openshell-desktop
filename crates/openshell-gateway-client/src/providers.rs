@@ -13,6 +13,7 @@ use openshell_core::proto::datamodel::v1::{ObjectMeta, Provider};
 use openshell_core::proto::{
     CreateProviderRequest, DeleteProviderRequest, ImportProviderProfilesRequest,
     ListProviderProfilesRequest, ListProvidersRequest, ProviderProfile, ProviderProfileImportItem,
+    UpdateProviderProfilesRequest,
 };
 
 use crate::{Error, Gateway, workspace};
@@ -143,6 +144,27 @@ fn missing(existing: &BTreeSet<String>) -> Vec<ProviderProfileImportItem> {
         .collect()
 }
 
+/// Bundled profiles that let the gateway renew a credential, where the
+/// gateway's copy of that profile does not. Earlier versions of the app
+/// imported upstream's static Codex profile, and Codex sign-in needs the
+/// renewing one. Each comes with the stored profile's resource version.
+fn stale(existing: &[ProviderProfile]) -> Vec<(ProviderProfile, u64)> {
+    bundled_profiles()
+        .into_iter()
+        .filter_map(|bundled| {
+            let stored = existing.iter().find(|p| p.id == bundled.id)?;
+            let lacks_refresh = bundled.credentials.iter().any(|credential| {
+                credential.refresh.is_some()
+                    && stored
+                        .credentials
+                        .iter()
+                        .any(|c| c.name == credential.name && c.refresh.is_none())
+            });
+            lacks_refresh.then_some((bundled, stored.resource_version))
+        })
+        .collect()
+}
+
 impl Gateway {
     /// Platform-scope provider profiles (the scope `profile import --global`
     /// uses), across every page.
@@ -171,7 +193,23 @@ impl Gateway {
     /// platform scope. Profiles the user changed are left alone, since import
     /// only creates. Returns how many were imported.
     pub async fn ensure_profiles(&mut self) -> Result<usize, Error> {
-        let existing = self.profiles().await?.into_iter().map(|p| p.id).collect();
+        let profiles = self.profiles().await?;
+        for (profile, version) in stale(&profiles) {
+            let id = profile.id.clone();
+            self.client
+                .update_provider_profiles(UpdateProviderProfilesRequest {
+                    workspace_scope: None,
+                    profile: Some(ProviderProfileImportItem {
+                        profile: Some(profile),
+                        source: format!("openshell-desktop/{id}.yaml"),
+                    }),
+                    expected_resource_version: version,
+                    id,
+                    request_id: String::new(),
+                })
+                .await?;
+        }
+        let existing = profiles.into_iter().map(|p| p.id).collect();
         let items = missing(&existing);
         if items.is_empty() {
             return Ok(0);
@@ -301,6 +339,21 @@ mod tests {
         assert!(!ids.contains(&"claude-code".to_owned()));
         assert!(!ids.contains(&"github".to_owned()));
         assert_eq!(ids.len(), BUNDLED.len() - 2);
+    }
+
+    #[test]
+    fn upgrades_profiles_that_cannot_renew_credentials() {
+        let mut stored = bundled_profiles();
+        assert!(stale(&stored).is_empty());
+        let codex = stored.iter_mut().find(|p| p.id == "codex").unwrap();
+        codex.resource_version = 7;
+        for credential in &mut codex.credentials {
+            credential.refresh = None;
+        }
+        let upgrades = stale(&stored);
+        assert_eq!(upgrades.len(), 1);
+        assert_eq!(upgrades[0].0.id, "codex");
+        assert_eq!(upgrades[0].1, 7);
     }
 
     #[test]

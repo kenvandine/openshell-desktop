@@ -566,19 +566,26 @@ impl Window {
             folder,
             options,
         } = request;
-        if let Account::New {
-            name: provider,
-            kind,
-            env_var,
-            key,
-        } = account
-        {
-            // Commands run in order, so the account exists before the sandbox.
-            self.send(Command::CreateProvider {
+        // Commands run in order, so the account exists before the sandbox.
+        match account {
+            Account::New {
+                name: provider,
+                kind,
+                env_var,
+                key,
+            } => self.send(Command::CreateProvider {
                 name: provider,
                 kind,
                 credentials: gateway::Credentials([(env_var, key)].into()),
-            });
+            }),
+            Account::Codex {
+                name: provider,
+                tokens,
+            } => self.send(Command::CreateCodexProvider {
+                name: provider,
+                tokens,
+            }),
+            Account::None | Account::Existing(_) => {}
         }
         if agent.is_some() || folder.is_some() {
             self.imp()
