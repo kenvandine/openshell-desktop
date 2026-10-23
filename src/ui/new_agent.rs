@@ -403,7 +403,9 @@ fn codex_sign_in(
         dialog,
         #[weak]
         import,
-        #[weak]
+        // Only shown, and so only kept alive by the page, when there are
+        // saved accounts to choose between.
+        #[strong]
         import_check,
         #[weak]
         next,
@@ -417,9 +419,16 @@ fn codex_sign_in(
                 .build();
             let window = dialog.root().and_downcast::<gtk::Window>();
             let imported = imported.clone();
+            let import_check = import_check.clone();
             chooser.open(window.as_ref(), gio::Cancellable::NONE, move |result| {
-                let Ok(file) = result else {
-                    return;
+                let file = match result {
+                    Ok(file) => file,
+                    Err(error) if error.matches(gtk::DialogError::Dismissed) => return,
+                    Err(error) => {
+                        import.set_subtitle(&format!("Couldn't open a file chooser: {error}"));
+                        import.add_css_class("error");
+                        return;
+                    }
                 };
                 let read = file
                     .load_contents(gio::Cancellable::NONE)

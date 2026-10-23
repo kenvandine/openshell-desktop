@@ -6,9 +6,10 @@
 //! main loop as `Action`s; the window pushes a new `Summary` whenever its
 //! sandbox list changes.
 
+use gtk::{gdk_pixbuf, gio, glib};
 use ksni::blocking::{Handle, TrayMethods};
 use ksni::menu::{StandardItem, SubMenu};
-use ksni::{MenuItem, Status, ToolTip};
+use ksni::{Icon, MenuItem, Status, ToolTip};
 
 use crate::APP_ID;
 
@@ -58,8 +59,10 @@ impl Summary {
 struct Tray {
     summary: Summary,
     actions: async_channel::Sender<Action>,
-    /// Where the app icon lives when it is not in the host's icon theme.
-    icon_theme_path: String,
+    /// The app icon at the sizes top bars use. The shell draws the item, and
+    /// it cannot look a snap's icon up by name in the host's icon theme, so
+    /// the item sends the pixels.
+    icon: Vec<Icon>,
 }
 
 impl Tray {
@@ -84,12 +87,8 @@ impl ksni::Tray for Tray {
         "OpenShell Desktop".into()
     }
 
-    fn icon_name(&self) -> String {
-        APP_ID.into()
-    }
-
-    fn icon_theme_path(&self) -> String {
-        self.icon_theme_path.clone()
+    fn icon_pixmap(&self) -> Vec<Icon> {
+        self.icon.clone()
     }
 
     fn attention_icon_name(&self) -> String {
@@ -172,16 +171,14 @@ impl Indicator {
     ) {
         let (actions, actions_rx) = async_channel::unbounded();
         let (handle_tx, handle_rx) = async_channel::bounded(1);
-        let icon_theme_path = std::env::var("SNAP")
-            .map(|snap| format!("{snap}/usr/share/icons"))
-            .unwrap_or_default();
+        let icon = icon_pixmaps();
         std::thread::Builder::new()
             .name("indicator".into())
             .spawn(move || {
                 let tray = Tray {
                     summary: Summary::default(),
                     actions,
-                    icon_theme_path,
+                    icon,
                 };
                 match tray.spawn() {
                     Ok(handle) => {
@@ -208,9 +205,66 @@ impl Indicator {
     }
 }
 
+/// The app icon rendered at 16 to 64 pixels, from `data/icons/indicator`.
+const ICON_PNGS: &[&[u8]] = &[
+    include_bytes!("../data/icons/indicator/16.png"),
+    include_bytes!("../data/icons/indicator/22.png"),
+    include_bytes!("../data/icons/indicator/24.png"),
+    include_bytes!("../data/icons/indicator/32.png"),
+    include_bytes!("../data/icons/indicator/48.png"),
+    include_bytes!("../data/icons/indicator/64.png"),
+];
+
+/// The icon as StatusNotifierItem pixmaps: ARGB32 in network byte order.
+fn icon_pixmaps() -> Vec<Icon> {
+    ICON_PNGS
+        .iter()
+        .filter_map(|png| {
+            let stream = gio::MemoryInputStream::from_bytes(&glib::Bytes::from_static(png));
+            let pixbuf = gdk_pixbuf::Pixbuf::from_stream(&stream, gio::Cancellable::NONE).ok()?;
+            Some(to_argb(&pixbuf))
+        })
+        .collect()
+}
+
+fn to_argb(pixbuf: &gdk_pixbuf::Pixbuf) -> Icon {
+    let (width, height) = (pixbuf.width(), pixbuf.height());
+    let channels = pixbuf.n_channels() as usize;
+    let stride = pixbuf.rowstride() as usize;
+    let pixels = pixbuf.read_pixel_bytes();
+    let mut data = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            let p = &pixels[y * stride + x * channels..][..channels];
+            let alpha = if channels == 4 { p[3] } else { 255 };
+            data.extend_from_slice(&[alpha, p[0], p[1], p[2]]);
+        }
+    }
+    Icon {
+        width,
+        height,
+        data,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn icon_is_sent_as_argb_pixmaps() {
+        let icons = icon_pixmaps();
+        assert_eq!(
+            icons.iter().map(|i| i.width).collect::<Vec<_>>(),
+            [16, 22, 24, 32, 48, 64]
+        );
+        let big = icons.last().unwrap();
+        assert_eq!(big.data.len(), 64 * 64 * 4);
+        // The corner is outside the rounded window; its middle is opaque.
+        assert_eq!(big.data[0], 0);
+        let middle = (32 * 64 + 32) * 4;
+        assert_eq!(big.data[middle], 255);
+    }
 
     #[test]
     fn headline_counts_running_and_waiting() {
