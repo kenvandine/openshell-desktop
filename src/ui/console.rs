@@ -41,10 +41,17 @@ pub fn open_shell(parent: &Window, sandbox: &str) {
     );
 }
 
-/// `agent` in `sandbox`, started in `workdir` (blank for the sandbox's own).
-pub fn open_agent(parent: &Window, sandbox: &str, agent: &Agent, workdir: &str) {
+/// `agent` in `sandbox`, started in `workdir` (blank for the sandbox's own),
+/// signed in to ChatGPT account `account_id` if it is Codex.
+pub fn open_agent(
+    parent: &Window,
+    sandbox: &str,
+    agent: &Agent,
+    workdir: &str,
+    account_id: Option<&str>,
+) {
     let options = ExecOptions {
-        command: agent.command(),
+        command: agent.command(account_id),
         workdir: workdir.to_owned(),
         environment: agent
             .environment
@@ -100,6 +107,10 @@ fn open(
         toolbar.add_top_bar(&adw::Banner::builder().title(warning).revealed(true).build());
     }
     toolbar.set_content(Some(&stack));
+    // Once the session ends its output stays, since that is often where the
+    // reason is, with this above it.
+    let ended = adw::Banner::builder().button_label("Close").build();
+    toolbar.add_top_bar(&ended);
 
     let window = adw::Window::builder()
         .title(title)
@@ -128,21 +139,19 @@ fn open(
     let terminal_handle = terminal.clone();
     let stack_weak = stack.downgrade();
     let window_weak = window.downgrade();
+    let close = window.downgrade();
+    ended.connect_button_clicked(move |_| {
+        if let Some(window) = close.upgrade() {
+            window.close();
+        }
+    });
     glib::spawn_future_local(async move {
         while let Ok(event) = events.recv().await {
             match event {
                 SessionEvent::Output(bytes) => terminal.feed(&bytes),
                 SessionEvent::Ended(code) => {
-                    let detail = code
-                        .filter(|&code| code != 0)
-                        .map(|code| format!("The command exited with status {code}."));
-                    show_status(
-                        &stack_weak,
-                        &window_weak,
-                        "Session Ended",
-                        detail.as_deref(),
-                        false,
-                    );
+                    ended.set_title(&ended_title(code));
+                    ended.set_revealed(true);
                     break;
                 }
                 SessionEvent::Error(error) => {
@@ -151,7 +160,6 @@ fn open(
                         &window_weak,
                         "Couldn't Open Terminal",
                         Some(&error),
-                        true,
                     );
                     break;
                 }
@@ -172,12 +180,18 @@ fn open(
     terminal_handle_focus.grab_focus();
 }
 
+fn ended_title(code: Option<i32>) -> String {
+    match code {
+        Some(code) if code != 0 => format!("Session ended: the command exited with status {code}"),
+        _ => "Session ended".to_owned(),
+    }
+}
+
 fn show_status(
     stack: &glib::WeakRef<gtk::Stack>,
     window: &glib::WeakRef<adw::Window>,
     title: &str,
     description: Option<&str>,
-    failed: bool,
 ) {
     let (Some(stack), Some(window)) = (stack.upgrade(), window.upgrade()) else {
         return;
@@ -189,15 +203,26 @@ fn show_status(
     close.connect_clicked(move |_| window.close());
 
     let status = adw::StatusPage::builder()
-        .icon_name(if failed {
-            "dialog-error-symbolic"
-        } else {
-            "utilities-terminal-symbolic"
-        })
+        .icon_name("dialog-error-symbolic")
         .title(title)
         .child(&close)
         .build();
     status.set_description(description);
     stack.add_named(&status, Some("status"));
     stack.set_visible_child(&status);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn says_how_the_session_ended() {
+        assert_eq!(ended_title(Some(0)), "Session ended");
+        assert_eq!(ended_title(None), "Session ended");
+        assert_eq!(
+            ended_title(Some(1)),
+            "Session ended: the command exited with status 1"
+        );
+    }
 }

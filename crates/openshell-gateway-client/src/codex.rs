@@ -19,6 +19,11 @@ use crate::{Error, Gateway, ProviderInfo, workspace};
 pub const PROFILE: &str = "codex";
 pub const ACCESS_TOKEN: &str = "CODEX_AUTH_ACCESS_TOKEN";
 pub const ACCOUNT_ID: &str = "CODEX_AUTH_ACCOUNT_ID";
+/// The provider setting holding the real account id. Codex checks its
+/// sign-in's account against the workspaces ChatGPT lists for it, so the
+/// sandbox needs the id itself; the handle never matches. The id names the
+/// account but grants nothing, unlike the tokens.
+pub const ACCOUNT_ID_CONFIG: &str = "account_id";
 /// The Codex CLI's public OAuth client, which its refresh tokens belong to.
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 
@@ -93,10 +98,13 @@ impl Gateway {
             (ACCESS_TOKEN.to_owned(), tokens.access_token.clone()),
             (ACCOUNT_ID.to_owned(), tokens.account_id.clone()),
         ]);
-        let provider = self.create_provider(name, PROFILE, credentials).await?;
+        let config = BTreeMap::from([(ACCOUNT_ID_CONFIG.to_owned(), tokens.account_id.clone())]);
+        let provider = self
+            .create_provider(name, PROFILE, credentials, config)
+            .await?;
         if let Err(error) = self.configure_codex_refresh(name, tokens).await {
             let _ = self.delete_provider(name).await;
-            return Err(error);
+            return Err(explain_refresh_error(error));
         }
         Ok(provider)
     }
@@ -133,6 +141,27 @@ impl Gateway {
     }
 }
 
+/// OpenAI refresh tokens work once. When the one in a sign-in file has
+/// already been used, by Codex on the host or by the gateway for an account
+/// imported from the same file, OpenAI answers 401 and only a new sign-in
+/// helps; say that rather than relaying the token endpoint's status.
+fn explain_refresh_error(error: Error) -> Error {
+    match error {
+        Error::Rpc(status)
+            if status.message().contains("401") || status.message().contains("invalid_grant") =>
+        {
+            Error::Rpc(crate::Status::new(
+                status.code(),
+                "OpenAI no longer accepts this sign-in; its refresh token has \
+                 already been used, possibly by an account imported from the \
+                 same file. Run \"codex login\" on this computer and import \
+                 the new sign-in.",
+            ))
+        }
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,6 +183,20 @@ mod tests {
         assert_eq!(tokens.refresh_token, "secret-refresh");
         assert_eq!(tokens.account_id, "acct");
         assert!(!format!("{tokens:?}").contains("secret"));
+    }
+
+    #[test]
+    fn explains_a_spent_refresh_token() {
+        let spent = Error::Rpc(crate::Status::failed_precondition(
+            "token endpoint returned HTTP 401 Unauthorized without a recognized OAuth error",
+        ));
+        assert!(
+            explain_refresh_error(spent)
+                .to_string()
+                .contains("codex login")
+        );
+        let other = Error::Rpc(crate::Status::internal("database locked"));
+        assert_eq!(explain_refresh_error(other).to_string(), "database locked");
     }
 
     #[test]

@@ -650,6 +650,9 @@ async fn provisions_a_workload_and_supervisor_pair() {
         ),
         ("1000", "1000", "0600")
     );
+    let resolv = state.file("openshell-sbx-1", "/etc/resolv.conf").unwrap();
+    assert_eq!(resolv.content, b"nameserver 127.0.0.53\n");
+    assert_eq!((resolv.mode.as_str(), resolv.uid.as_str()), ("0644", "0"));
     let config: Value = serde_json::from_slice(&bootstrap.content).unwrap();
     assert_eq!(config["boundary_id"], "sbx-1");
     assert_eq!(config["child_env"]["LANG"], "C");

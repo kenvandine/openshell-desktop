@@ -100,6 +100,8 @@ pub struct Sandbox {
     pub policy: Option<PolicyView>,
     /// Catalog id of the agent the app installs and runs in it.
     pub agent: Option<String>,
+    /// Names of the gateway providers attached to it.
+    pub providers: Vec<String>,
     /// Whether the gateway allows low-risk blocked requests by itself.
     pub auto_approve: AutoApprove,
 }
@@ -189,6 +191,7 @@ impl Sandbox {
             prompts: vec![],
             policy: None,
             agent: None,
+            providers: vec![],
             auto_approve: AutoApprove::default(),
         }
     }
@@ -218,6 +221,7 @@ impl Sandbox {
             prompts: vec![],
             policy: None,
             agent: None,
+            providers: vec![],
             auto_approve: AutoApprove::default(),
         });
         sandbox.name = info.name.clone();
@@ -228,6 +232,7 @@ impl Sandbox {
         };
         sandbox.phase = info.phase.clone();
         sandbox.agent = info.agent.clone();
+        sandbox.providers = info.providers.clone();
         sandbox.auto_approve = snapshot.auto_approve;
         sandbox.status_detail = info.detail.clone();
         sandbox.rules = snapshot
