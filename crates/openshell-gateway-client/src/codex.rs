@@ -19,6 +19,11 @@ use crate::{Error, Gateway, ProviderInfo, workspace};
 pub const PROFILE: &str = "codex";
 pub const ACCESS_TOKEN: &str = "CODEX_AUTH_ACCESS_TOKEN";
 pub const ACCOUNT_ID: &str = "CODEX_AUTH_ACCOUNT_ID";
+/// The provider setting holding the real account id. Codex checks its
+/// sign-in's account against the workspaces ChatGPT lists for it, so the
+/// sandbox needs the id itself; the handle never matches. The id names the
+/// account but grants nothing, unlike the tokens.
+pub const ACCOUNT_ID_CONFIG: &str = "account_id";
 /// The Codex CLI's public OAuth client, which its refresh tokens belong to.
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 
@@ -93,7 +98,10 @@ impl Gateway {
             (ACCESS_TOKEN.to_owned(), tokens.access_token.clone()),
             (ACCOUNT_ID.to_owned(), tokens.account_id.clone()),
         ]);
-        let provider = self.create_provider(name, PROFILE, credentials).await?;
+        let config = BTreeMap::from([(ACCOUNT_ID_CONFIG.to_owned(), tokens.account_id.clone())]);
+        let provider = self
+            .create_provider(name, PROFILE, credentials, config)
+            .await?;
         if let Err(error) = self.configure_codex_refresh(name, tokens).await {
             let _ = self.delete_provider(name).await;
             return Err(error);

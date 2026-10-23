@@ -373,7 +373,9 @@ async fn execute(gateway: &mut Gateway, command: Command) -> Result<Outcome, Err
             kind,
             credentials,
         } => {
-            gateway.create_provider(&name, &kind, credentials.0).await?;
+            gateway
+                .create_provider(&name, &kind, credentials.0, BTreeMap::new())
+                .await?;
             accounts_changed = true;
             Some(format!("Added account {name}"))
         }

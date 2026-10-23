@@ -110,6 +110,7 @@ mod tests {
             prompts: Vec::new(),
             policy: None,
             agent: None,
+            providers: Vec::new(),
             auto_approve: Default::default(),
         }
     }

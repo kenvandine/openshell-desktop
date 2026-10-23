@@ -116,13 +116,15 @@ pub struct Agent {
 }
 
 impl Agent {
-    pub fn command(&self) -> Vec<String> {
+    /// The command that starts the agent. `account_id` is the real id of
+    /// the ChatGPT account a Codex sandbox signs in with, when known.
+    pub fn command(&self, account_id: Option<&str>) -> Vec<String> {
         match self.launch {
             Launch::Direct => vec![self.install_path.to_owned()],
             Launch::CodexSignIn => vec![
                 "/bin/sh".to_owned(),
                 "-c".to_owned(),
-                codex_sign_in_script(self.install_path, unix_now()),
+                codex_sign_in_script(self.install_path, account_id, unix_now()),
             ],
         }
     }
@@ -162,29 +164,44 @@ fn unix_now() -> u64 {
 
 /// A shell script that writes Codex's sign-in file and runs `binary`.
 ///
-/// The file holds the handles the gateway put in the environment, not real
-/// tokens; the proxy swaps them on requests to OpenAI. `chatgptAuthTokens`
-/// tells Codex the tokens are managed elsewhere, so it never tries to renew
-/// them itself (the gateway does). Codex also wants an ID token to read the
-/// account from, which is never sent anywhere, so it gets an unsigned
-/// stand-in, as in OpenShell's own Codex example. Without an account in the
-/// environment the file is left alone and Codex asks the user to sign in.
-fn codex_sign_in_script(binary: &str, now: u64) -> String {
+/// The file holds the handle the gateway put in the environment for the
+/// access token, not the token; the proxy swaps it on requests to OpenAI.
+/// `chatgptAuthTokens` tells Codex the tokens are managed elsewhere, so it
+/// never tries to renew them itself (the gateway does). Codex also wants an
+/// ID token to read the account from, which is never sent anywhere, so it
+/// gets an unsigned stand-in, as in OpenShell's own Codex example.
+///
+/// The account id has to be the real one: Codex checks it against the
+/// workspaces ChatGPT lists for the account, and a handle is never among
+/// them. Without it the handle is the best there is. Without an account in
+/// the environment the file is left alone and Codex asks the user to sign in.
+fn codex_sign_in_script(binary: &str, account_id: Option<&str>, now: u64) -> String {
     let b64 = |json: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json);
+    // Ids are UUIDs; anything else stays out of the script.
+    let account_id = account_id.filter(|id| {
+        !id.is_empty()
+            && id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    });
+    let account_claim = account_id
+        .map(|id| format!(r#","https://api.openai.com/auth":{{"chatgpt_account_id":"{id}"}}"#))
+        .unwrap_or_default();
     let id_token = format!(
         "{}.{}.placeholder",
         b64(r#"{"alg":"none","typ":"JWT"}"#),
         b64(&format!(
-            r#"{{"iss":"https://auth.openai.com","aud":"codex","sub":"openshell-desktop","email":"codex@openshell.local","iat":{now},"exp":{}}}"#,
+            r#"{{"iss":"https://auth.openai.com","aud":"codex","sub":"openshell-desktop","email":"codex@openshell.local","iat":{now},"exp":{}{account_claim}}}"#,
             now + 365 * 24 * 3600
         )),
     );
+    let account_id = account_id.unwrap_or("$CODEX_AUTH_ACCOUNT_ID");
     format!(
         r#"if [ -n "$CODEX_AUTH_ACCESS_TOKEN" ]; then
   mkdir -p "$HOME/.codex"
   umask 077
   cat > "$HOME/.codex/auth.json" <<EOF
-{{"auth_mode":"chatgptAuthTokens","OPENAI_API_KEY":null,"tokens":{{"id_token":"{id_token}","access_token":"$CODEX_AUTH_ACCESS_TOKEN","refresh_token":"","account_id":"$CODEX_AUTH_ACCOUNT_ID"}},"last_refresh":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}}
+{{"auth_mode":"chatgptAuthTokens","OPENAI_API_KEY":null,"tokens":{{"id_token":"{id_token}","access_token":"$CODEX_AUTH_ACCESS_TOKEN","refresh_token":"","account_id":"{account_id}"}},"last_refresh":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}}
 EOF
 fi
 exec {binary}"#
@@ -579,12 +596,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn codex_gets_a_sign_in_file_made_of_handles() {
+    /// Runs `script` with a sandbox's Codex environment and returns the
+    /// sign-in file and its ID token's claims.
+    fn run_sign_in(script: &str) -> (serde_json::Value, serde_json::Value) {
         let home = tempfile::tempdir().unwrap();
-        let script = codex_sign_in_script("/bin/true", 1_700_000_000);
         let status = std::process::Command::new("/bin/sh")
-            .args(["-c", &script])
+            .args(["-c", script])
             .env("HOME", home.path())
             .env("CODEX_AUTH_ACCESS_TOKEN", "openshell:handle:access")
             .env("CODEX_AUTH_ACCOUNT_ID", "openshell:handle:account")
@@ -594,10 +611,6 @@ mod tests {
         let auth: serde_json::Value =
             serde_json::from_slice(&std::fs::read(home.path().join(".codex/auth.json")).unwrap())
                 .unwrap();
-        assert_eq!(auth["auth_mode"], "chatgptAuthTokens");
-        assert_eq!(auth["tokens"]["access_token"], "openshell:handle:access");
-        assert_eq!(auth["tokens"]["account_id"], "openshell:handle:account");
-        assert_eq!(auth["tokens"]["refresh_token"], "");
         let claims = auth["tokens"]["id_token"]
             .as_str()
             .unwrap()
@@ -605,13 +618,35 @@ mod tests {
             .nth(1)
             .unwrap()
             .to_owned();
-        let claims: serde_json::Value = serde_json::from_slice(
+        let claims = serde_json::from_slice(
             &base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .decode(claims)
                 .unwrap(),
         )
         .unwrap();
+        (auth, claims)
+    }
+
+    #[test]
+    fn codex_gets_a_sign_in_file_with_the_real_account() {
+        let account = "4f1e2d3c-0000-4abc-8def-123456789abc";
+        let script = codex_sign_in_script("/bin/true", Some(account), 1_700_000_000);
+        let (auth, claims) = run_sign_in(&script);
+        assert_eq!(auth["auth_mode"], "chatgptAuthTokens");
+        assert_eq!(auth["tokens"]["access_token"], "openshell:handle:access");
+        assert_eq!(auth["tokens"]["account_id"], account);
+        assert_eq!(auth["tokens"]["refresh_token"], "");
         assert_eq!(claims["iat"], 1_700_000_000);
+        assert_eq!(
+            claims["https://api.openai.com/auth"]["chatgpt_account_id"],
+            account
+        );
+
+        // An id that isn't one never reaches the script; the handle stands in.
+        let script = codex_sign_in_script("/bin/true", Some("x\"; rm -rf /"), 1_700_000_000);
+        let (auth, claims) = run_sign_in(&script);
+        assert_eq!(auth["tokens"]["account_id"], "openshell:handle:account");
+        assert!(claims.get("https://api.openai.com/auth").is_none());
 
         // Without an account, Codex is left to sign in by itself.
         let bare = tempfile::tempdir().unwrap();

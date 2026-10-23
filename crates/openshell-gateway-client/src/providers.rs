@@ -111,6 +111,8 @@ pub struct ProviderInfo {
     pub kind: String,
     /// Which credential keys hold a value.
     pub credential_keys: Vec<String>,
+    /// Its non-secret settings.
+    pub config: BTreeMap<String, String>,
 }
 
 impl ProviderInfo {
@@ -127,6 +129,7 @@ impl ProviderInfo {
                 .unwrap_or_default(),
             kind: provider.r#type.clone(),
             credential_keys,
+            config: provider.config.clone().into_iter().collect(),
         }
     }
 }
@@ -266,6 +269,7 @@ impl Gateway {
         name: &str,
         kind: &str,
         credentials: BTreeMap<String, String>,
+        config: BTreeMap<String, String>,
     ) -> Result<ProviderInfo, Error> {
         let response = self
             .client
@@ -278,6 +282,7 @@ impl Gateway {
                     }),
                     r#type: kind.into(),
                     credentials: credentials.into_iter().collect(),
+                    config: config.into_iter().collect(),
                     ..Default::default()
                 }),
                 request_id: String::new(),
@@ -292,6 +297,7 @@ impl Gateway {
                 name: name.into(),
                 kind: kind.into(),
                 credential_keys: Vec::new(),
+                config: BTreeMap::new(),
             }))
     }
 

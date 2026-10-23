@@ -41,10 +41,17 @@ pub fn open_shell(parent: &Window, sandbox: &str) {
     );
 }
 
-/// `agent` in `sandbox`, started in `workdir` (blank for the sandbox's own).
-pub fn open_agent(parent: &Window, sandbox: &str, agent: &Agent, workdir: &str) {
+/// `agent` in `sandbox`, started in `workdir` (blank for the sandbox's own),
+/// signed in to ChatGPT account `account_id` if it is Codex.
+pub fn open_agent(
+    parent: &Window,
+    sandbox: &str,
+    agent: &Agent,
+    workdir: &str,
+    account_id: Option<&str>,
+) {
     let options = ExecOptions {
-        command: agent.command(),
+        command: agent.command(account_id),
         workdir: workdir.to_owned(),
         environment: agent
             .environment

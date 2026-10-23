@@ -137,6 +137,8 @@ pub struct SandboxInfo {
     pub image: String,
     /// The agent the app installed for it (`AGENT_LABEL`), if any.
     pub agent: Option<String>,
+    /// Names of the providers attached to it.
+    pub providers: Vec<String>,
 }
 
 /// Label naming the agent a sandbox was created for, by catalog id.
@@ -177,6 +179,11 @@ impl SandboxInfo {
                 .map(|t| t.image.clone())
                 .unwrap_or_default(),
             agent: meta.and_then(|m| m.labels.get(AGENT_LABEL)).cloned(),
+            providers: sandbox
+                .spec
+                .as_ref()
+                .map(|s| s.providers.clone())
+                .unwrap_or_default(),
         }
     }
 }
@@ -700,6 +707,7 @@ impl Gateway {
                     .iter()
                     .find(|(key, _)| key == AGENT_LABEL)
                     .map(|(_, value)| value.clone()),
+                providers: options.providers.clone(),
             }))
     }
 

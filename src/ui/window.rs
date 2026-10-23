@@ -635,6 +635,18 @@ impl Window {
         }
     }
 
+    /// The real account id of the Codex account attached to `sandbox`, which
+    /// accounts added before the app stored it lack.
+    fn codex_account_id(&self, sandbox: &Sandbox) -> Option<String> {
+        use openshell_gateway_client::codex;
+        self.imp()
+            .providers
+            .borrow()
+            .iter()
+            .filter(|p| p.kind == codex::PROFILE && sandbox.providers.contains(&p.name))
+            .find_map(|p| p.config.get(codex::ACCOUNT_ID_CONFIG).cloned())
+    }
+
     /// Installs `agent` if the sandbox lacks it, then opens its terminal.
     fn run_agent(&self, sandbox: &Sandbox, agent: &'static openshell_agents::Agent, workdir: &str) {
         let events = crate::install::spawn(agent, sandbox.name.clone(), sandbox.instance.clone());
@@ -648,6 +660,7 @@ impl Window {
         );
         dialog.add_response("close", "Close");
         dialog.set_extra_child(Some(&progress));
+        let account_id = self.codex_account_id(sandbox);
         let sandbox = sandbox.name.clone();
         let workdir = workdir.to_owned();
         glib::spawn_future_local(glib::clone!(
@@ -689,7 +702,13 @@ impl Window {
                             if let Some(version) = version {
                                 win.toast(&format!("Installed {} {version}", agent.name));
                             }
-                            console::open_agent(&win, &sandbox, agent, &workdir);
+                            console::open_agent(
+                                &win,
+                                &sandbox,
+                                agent,
+                                &workdir,
+                                account_id.as_deref(),
+                            );
                         }
                         InstallEvent::Failed(error) => {
                             dialog.set_heading(Some(&format!("Couldn't Install {}", agent.name)));
