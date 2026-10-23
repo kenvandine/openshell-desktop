@@ -376,7 +376,7 @@ pub async fn fetch(
 
     let dir = cache.join(format!("{}-{}", agent.id, manifest.version));
     let path = dir.join(agent.id);
-    if path.exists() {
+    if cached(&path, agent.layout)? {
         return Ok(Download {
             version: manifest.version,
             path,
@@ -433,6 +433,27 @@ pub async fn fetch(
         version: manifest.version,
         path,
     })
+}
+
+/// Whether `path` holds a finished build in the shape `layout` needs. One in
+/// the wrong shape is removed: earlier versions of the app cached Codex as a
+/// lone binary under the name its package directory now takes.
+fn cached(path: &Path, layout: Layout) -> Result<bool, Error> {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return Ok(false);
+    };
+    let wanted = match layout {
+        Layout::Binary(_) => meta.is_file(),
+        Layout::Tree { .. } => meta.is_dir(),
+    };
+    if !wanted {
+        if meta.is_dir() {
+            std::fs::remove_dir_all(path)?;
+        } else {
+            std::fs::remove_file(path)?;
+        }
+    }
+    Ok(wanted)
 }
 
 /// Unpacks everything under `root` in the gzipped tarball at `archive` into
@@ -667,6 +688,25 @@ mod tests {
             extract(&archive, "package/missing", &out, "x"),
             Err(Error::MissingEntry { .. })
         ));
+    }
+
+    #[test]
+    fn replaces_a_cache_entry_of_the_wrong_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("codex");
+        let tree = find("codex").unwrap().layout;
+        let binary = find("opencode").unwrap().layout;
+        assert!(!cached(&path, tree).unwrap());
+
+        std::fs::write(&path, b"ELF").unwrap();
+        assert!(cached(&path, binary).unwrap());
+        assert!(!cached(&path, tree).unwrap());
+        assert!(!path.exists());
+
+        std::fs::create_dir_all(path.join("bin")).unwrap();
+        assert!(cached(&path, tree).unwrap());
+        assert!(!cached(&path, binary).unwrap());
+        assert!(!path.exists());
     }
 
     #[test]
