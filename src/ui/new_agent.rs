@@ -459,8 +459,11 @@ fn codex_sign_in(
 
     let note = adw::PreferencesGroup::builder()
         .description(
-            "When the gateway renews the tokens, OpenAI may sign Codex out on this \
-             computer. If that happens, run \"codex login\" there again.",
+            "Only one program can renew a sign-in: once the gateway renews it, Codex \
+             on this computer is signed out, and the same file can't be imported \
+             again. To keep both, give OpenShell a sign-in of its own with \
+             \"CODEX_HOME=~/codex-openshell codex login\", import \
+             ~/codex-openshell/auth.json, then delete that folder.",
         )
         .build();
 
