@@ -3,10 +3,10 @@
 //! OpenShell's default sandbox image is bare Ubuntu, so the app brings the
 //! agent itself: it downloads the agent's native Linux build from the npm
 //! registry, checks it against the registry's SHA-512 integrity value, and
-//! keeps the binary in a local cache. The app then copies it into the
-//! sandbox at `install_path`, which is where OpenShell's provider profile
-//! for that agent expects it; the profile only injects credentials into
-//! processes running that binary.
+//! keeps the build in a local cache. The app then copies it into the
+//! sandbox following the agent's [`Install::plan`], at paths OpenShell's
+//! provider profile for that agent allows; the profile only injects
+//! credentials into processes running those binaries.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -75,13 +75,33 @@ pub enum Launch {
     CodexSignIn,
 }
 
+/// What of the npm package the sandbox gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layout {
+    /// One executable at this path in the archive, copied to the agent's
+    /// `install_path`. `{triple}` is the Rust target, such as
+    /// `x86_64-unknown-linux-musl`.
+    Binary(&'static str),
+    /// A whole directory of the archive, for agents that need files beside
+    /// their executable. It is copied to `dir`, and `install_path` becomes a
+    /// small script running `dir/exe`. Both paths may hold `{triple}`.
+    Tree {
+        root: &'static str,
+        dir: &'static str,
+        exe: &'static str,
+        /// Options the launcher always passes.
+        args: &'static str,
+    },
+}
+
 /// An agent the New Agent dialog offers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Agent {
     pub id: &'static str,
     pub name: &'static str,
     pub description: &'static str,
-    /// Where the binary goes in the sandbox, matching the provider profile.
+    /// The command in the sandbox's PATH that runs the agent, matching the
+    /// provider profile.
     pub install_path: &'static str,
     /// Provider profiles whose accounts this agent can use, best first.
     pub profiles: &'static [&'static str],
@@ -92,9 +112,7 @@ pub struct Agent {
     package: &'static str,
     /// The version or dist-tag of that package to fetch, with `{arch}` too.
     tag: &'static str,
-    /// The binary's path inside that package's archive; `{triple}` is the
-    /// Rust target, such as `x86_64-unknown-linux-musl`.
-    entry: &'static str,
+    layout: Layout,
 }
 
 impl Agent {
@@ -117,10 +135,24 @@ impl Agent {
         self.tag.replace("{arch}", arch.npm())
     }
 
-    fn entry(&self, arch: Arch) -> String {
-        self.entry.replace("{triple}", arch.triple())
+    /// The command that succeeds in the sandbox once this agent is fully
+    /// installed. A tree install leaves a marker as its last step, so one
+    /// cut short, or a bare binary from an older version of the app, gets
+    /// installed again.
+    pub fn installed_check(&self, arch: Arch) -> Vec<String> {
+        match self.layout {
+            Layout::Binary(_) => vec!["test".into(), "-x".into(), self.install_path.into()],
+            Layout::Tree { dir, .. } => vec![
+                "test".into(),
+                "-f".into(),
+                format!("{}/{MARKER}", dir.replace("{triple}", arch.triple())),
+            ],
+        }
     }
 }
+
+/// The file a finished tree install leaves in its directory.
+const MARKER: &str = ".openshell-desktop-installed";
 
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
@@ -172,7 +204,7 @@ pub const CATALOG: &[Agent] = &[
         launch: Launch::Direct,
         package: "@anthropic-ai/claude-code-linux-{arch}",
         tag: "latest",
-        entry: "package/claude",
+        layout: Layout::Binary("package/claude"),
     },
     Agent {
         id: "codex",
@@ -186,7 +218,19 @@ pub const CATALOG: &[Agent] = &[
         // package published under a per-platform version and dist-tag.
         package: "@openai/codex",
         tag: "linux-{arch}",
-        entry: "package/vendor/{triple}/bin/codex",
+        // Codex refuses to run without the rest of its package (its
+        // manifest, rg, bwrap and helpers) beside it. It goes where npm
+        // would put it, which the Codex profile allows.
+        layout: Layout::Tree {
+            root: "package/vendor/{triple}",
+            dir: "/usr/local/lib/node_modules/@openai/codex/vendor/{triple}",
+            exe: "bin/codex",
+            // By default Codex copies itself into ~/.codex and runs its
+            // server from there, a path the profile does not allow, so the
+            // gateway would neither let it out nor give it the account.
+            // Without auto-start it runs that server in its own process.
+            args: " -c features.daemon_auto_start=false",
+        },
     },
     Agent {
         id: "opencode",
@@ -198,7 +242,7 @@ pub const CATALOG: &[Agent] = &[
         launch: Launch::Direct,
         package: "opencode-linux-{arch}",
         tag: "latest",
-        entry: "package/bin/opencode",
+        layout: Layout::Binary("package/bin/opencode"),
     },
 ];
 
@@ -218,12 +262,92 @@ struct Dist {
     integrity: String,
 }
 
-/// A verified agent binary in the local cache.
+/// A verified agent build in the local cache: one file, or a directory for
+/// a [`Layout::Tree`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Download {
     pub version: String,
     pub path: PathBuf,
-    pub size: u64,
+}
+
+/// One step of copying an agent into a sandbox.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Step {
+    /// Make this directory unless it exists.
+    Dir(String),
+    /// Copy a file from the cache.
+    File {
+        source: PathBuf,
+        target: String,
+        mode: u32,
+        size: u64,
+    },
+    /// Write these bytes.
+    Text {
+        target: String,
+        mode: u32,
+        content: String,
+    },
+}
+
+impl Download {
+    /// What to copy into the sandbox, in order: directories before what goes
+    /// in them, and the marker that says the install is complete last.
+    pub fn plan(&self, agent: &Agent, arch: Arch) -> Result<Vec<Step>, Error> {
+        let Layout::Tree { dir, exe, args, .. } = agent.layout else {
+            return Ok(vec![Step::File {
+                source: self.path.clone(),
+                target: agent.install_path.to_owned(),
+                mode: 0o755,
+                size: std::fs::metadata(&self.path)?.len(),
+            }]);
+        };
+        let dir = dir.replace("{triple}", arch.triple());
+        // Its ancestors may be missing, such as node_modules; `/` is not.
+        let mut steps: Vec<Step> = Path::new(&dir)
+            .ancestors()
+            .skip(1)
+            .filter(|path| path.parent().is_some())
+            .map(|path| Step::Dir(path.display().to_string()))
+            .collect();
+        steps.reverse();
+        steps.push(Step::Dir(dir.clone()));
+        plan_tree(&self.path, &dir, &mut steps)?;
+        steps.push(Step::Text {
+            target: agent.install_path.to_owned(),
+            mode: 0o755,
+            content: format!("#!/bin/sh\nexec {dir}/{exe}{args} \"$@\"\n"),
+        });
+        steps.push(Step::Text {
+            target: format!("{dir}/{MARKER}"),
+            mode: 0o644,
+            content: format!("{}\n", self.version),
+        });
+        Ok(steps)
+    }
+}
+
+/// Adds the contents of `source` to `steps`, as copies under `target`.
+fn plan_tree(source: &Path, target: &str, steps: &mut Vec<Step>) -> Result<(), Error> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut entries = std::fs::read_dir(source)?.collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let meta = entry.metadata()?;
+        let path = format!("{target}/{}", entry.file_name().to_string_lossy());
+        if meta.is_dir() {
+            steps.push(Step::Dir(path.clone()));
+            plan_tree(&entry.path(), &path, steps)?;
+        } else {
+            steps.push(Step::File {
+                source: entry.path(),
+                target: path,
+                mode: meta.permissions().mode() & 0o777,
+                size: meta.len(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Fetches the latest build of `agent` into `cache`, unless that version is
@@ -251,12 +375,11 @@ pub async fn fetch(
         .await?;
 
     let dir = cache.join(format!("{}-{}", agent.id, manifest.version));
-    let binary = dir.join(agent.id);
-    if let Ok(meta) = std::fs::metadata(&binary) {
+    let path = dir.join(agent.id);
+    if path.exists() {
         return Ok(Download {
             version: manifest.version,
-            path: binary,
-            size: meta.len(),
+            path,
         });
     }
 
@@ -283,9 +406,23 @@ pub async fn fetch(
     }
     drop(archive.1);
 
-    let result = extract(&archive.0, &agent.entry(arch), &dir, agent.id);
+    let result = match agent.layout {
+        Layout::Binary(entry) => extract(
+            &archive.0,
+            &entry.replace("{triple}", arch.triple()),
+            &dir,
+            agent.id,
+        )
+        .map(drop),
+        Layout::Tree { root, .. } => extract_tree(
+            &archive.0,
+            &root.replace("{triple}", arch.triple()),
+            &dir,
+            agent.id,
+        ),
+    };
     let _ = std::fs::remove_file(&archive.0);
-    let size = result.map_err(|e| match e {
+    result.map_err(|e| match e {
         Error::MissingEntry { entry, .. } => Error::MissingEntry {
             package: package.clone(),
             entry,
@@ -294,9 +431,61 @@ pub async fn fetch(
     })?;
     Ok(Download {
         version: manifest.version,
-        path: binary,
-        size,
+        path,
     })
+}
+
+/// Unpacks everything under `root` in the gzipped tarball at `archive` into
+/// directory `dir/name`, keeping file modes, through a temporary name so a
+/// partial tree never looks cached. Links and other special entries, which
+/// npm packages do not have, are left out.
+fn extract_tree(archive: &Path, root: &str, dir: &Path, name: &str) -> Result<(), Error> {
+    use std::os::unix::fs::PermissionsExt;
+    let partial = dir.join(format!(".{name}.partial"));
+    let _ = std::fs::remove_dir_all(&partial);
+    std::fs::create_dir_all(&partial)?;
+    let file = std::fs::File::open(archive)?;
+    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    let mut found = false;
+    for item in tar.entries()? {
+        let mut item = item?;
+        let path = item.path()?.into_owned();
+        let Ok(relative) = path.strip_prefix(root) else {
+            continue;
+        };
+        found = true;
+        // Never write outside the tree, whatever the archive says.
+        if relative
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        {
+            continue;
+        }
+        let out = partial.join(relative);
+        match item.header().entry_type() {
+            tar::EntryType::Directory => std::fs::create_dir_all(&out)?,
+            tar::EntryType::Regular => {
+                if let Some(parent) = out.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let mut file = std::fs::File::create(&out)?;
+                std::io::copy(&mut item, &mut file)?;
+                let mode = item.header().mode()? & 0o777;
+                file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+                file.sync_all()?;
+            }
+            _ => {}
+        }
+    }
+    if !found {
+        let _ = std::fs::remove_dir_all(&partial);
+        return Err(Error::MissingEntry {
+            package: String::new(),
+            entry: root.to_owned(),
+        });
+    }
+    std::fs::rename(&partial, dir.join(name))?;
+    Ok(())
 }
 
 /// The SHA-512 digest from an npm `sha512-<base64>` integrity string.
@@ -356,8 +545,16 @@ mod tests {
         assert_eq!(codex.package(Arch::X64), "@openai/codex");
         assert_eq!(codex.tag(Arch::Arm64), "linux-arm64");
         assert_eq!(
-            codex.entry(Arch::X64),
-            "package/vendor/x86_64-unknown-linux-musl/bin/codex"
+            codex.installed_check(Arch::X64),
+            [
+                "test",
+                "-f",
+                "/usr/local/lib/node_modules/@openai/codex/vendor/x86_64-unknown-linux-musl/.openshell-desktop-installed"
+            ]
+        );
+        assert_eq!(
+            find("opencode").unwrap().installed_check(Arch::X64),
+            ["test", "-x", "/usr/local/bin/opencode"]
         );
     }
 
@@ -432,28 +629,34 @@ mod tests {
         assert!(parse_integrity("sha1-abc").is_err());
     }
 
+    /// A gzipped tarball of `files`, as (path, mode, content).
+    fn tarball(path: &Path, files: &[(&str, u32, &[u8])]) {
+        let gz = flate2::write::GzEncoder::new(
+            std::fs::File::create(path).unwrap(),
+            flate2::Compression::fast(),
+        );
+        let mut builder = tar::Builder::new(gz);
+        for (name, mode, data) in files {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(*mode);
+            header.set_cksum();
+            builder.append_data(&mut header, name, *data).unwrap();
+        }
+        builder.into_inner().unwrap().finish().unwrap();
+    }
+
     #[test]
     fn extracts_one_entry() {
         let dir = tempfile::tempdir().unwrap();
         let archive = dir.path().join("pkg.tgz");
-        {
-            let gz = flate2::write::GzEncoder::new(
-                std::fs::File::create(&archive).unwrap(),
-                flate2::Compression::fast(),
-            );
-            let mut builder = tar::Builder::new(gz);
-            for (path, data) in [
-                ("package/README.md", &b"hi"[..]),
-                ("package/claude", b"ELF"),
-            ] {
-                let mut header = tar::Header::new_gnu();
-                header.set_size(data.len() as u64);
-                header.set_mode(0o755);
-                header.set_cksum();
-                builder.append_data(&mut header, path, data).unwrap();
-            }
-            builder.into_inner().unwrap().finish().unwrap();
-        }
+        tarball(
+            &archive,
+            &[
+                ("package/README.md", 0o644, b"hi"),
+                ("package/claude", 0o755, b"ELF"),
+            ],
+        );
         let out = dir.path().join("claude-code-1.0");
         assert_eq!(
             extract(&archive, "package/claude", &out, "claude-code").unwrap(),
@@ -462,6 +665,96 @@ mod tests {
         assert_eq!(std::fs::read(out.join("claude-code")).unwrap(), b"ELF");
         assert!(matches!(
             extract(&archive, "package/missing", &out, "x"),
+            Err(Error::MissingEntry { .. })
+        ));
+    }
+
+    #[test]
+    fn codex_gets_its_whole_package_and_a_launcher() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("codex.tgz");
+        let root = "package/vendor/x86_64-unknown-linux-musl";
+        tarball(
+            &archive,
+            &[
+                ("package/bin/codex.js", 0o755, b"node"),
+                (&format!("{root}/codex-package.json"), 0o644, b"{}"),
+                (&format!("{root}/bin/codex"), 0o755, b"ELF"),
+                (&format!("{root}/codex-path/rg"), 0o755, b"ELF rg"),
+            ],
+        );
+        let out = dir.path().join("codex-0.1");
+        extract_tree(&archive, root, &out, "codex").unwrap();
+        let tree = out.join("codex");
+        assert_eq!(std::fs::read(tree.join("bin/codex")).unwrap(), b"ELF");
+        let mode = |path: &str| {
+            std::fs::metadata(tree.join(path))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        assert_eq!(mode("codex-path/rg"), 0o755);
+        assert_eq!(mode("codex-package.json"), 0o644);
+        assert!(!tree.join("codex.js").exists());
+
+        let codex = find("codex").unwrap();
+        let download = Download {
+            version: "0.1".into(),
+            path: tree.clone(),
+        };
+        let steps = download.plan(codex, Arch::X64).unwrap();
+        let dir = "/usr/local/lib/node_modules/@openai/codex/vendor/x86_64-unknown-linux-musl";
+        let dirs: Vec<&str> = steps
+            .iter()
+            .filter_map(|step| match step {
+                Step::Dir(path) => Some(path.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            dirs,
+            [
+                "/usr",
+                "/usr/local",
+                "/usr/local/lib",
+                "/usr/local/lib/node_modules",
+                "/usr/local/lib/node_modules/@openai",
+                "/usr/local/lib/node_modules/@openai/codex",
+                "/usr/local/lib/node_modules/@openai/codex/vendor",
+                dir,
+                &format!("{dir}/bin"),
+                &format!("{dir}/codex-path"),
+            ]
+        );
+        assert!(steps.contains(&Step::File {
+            source: tree.join("codex-path/rg"),
+            target: format!("{dir}/codex-path/rg"),
+            mode: 0o755,
+            size: 6,
+        }));
+        assert_eq!(
+            steps[steps.len() - 2],
+            Step::Text {
+                target: "/usr/local/bin/codex".into(),
+                mode: 0o755,
+                content: format!(
+                    "#!/bin/sh\nexec {dir}/bin/codex -c features.daemon_auto_start=false \"$@\"\n"
+                ),
+            }
+        );
+        assert_eq!(
+            steps.last().unwrap(),
+            &Step::Text {
+                target: format!("{dir}/.openshell-desktop-installed"),
+                mode: 0o644,
+                content: "0.1\n".into(),
+            }
+        );
+
+        assert!(matches!(
+            extract_tree(&archive, "package/vendor/missing", &out, "x"),
             Err(Error::MissingEntry { .. })
         ));
     }
@@ -477,7 +770,7 @@ async fn fetches_opencode_from_npm() {
     let download = fetch(agent, Arch::host().unwrap(), cache.path(), |_, _| {})
         .await
         .unwrap();
-    assert!(download.size > 1_000_000);
+    assert!(std::fs::metadata(&download.path).unwrap().len() > 1_000_000);
     let again = fetch(agent, Arch::host().unwrap(), cache.path(), |_, _| {
         panic!("a cached version must not download again")
     })

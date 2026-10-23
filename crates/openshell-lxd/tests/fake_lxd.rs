@@ -93,6 +93,21 @@ fn serve(stream: UnixStream, seen: Sender<Seen>) {
             seen.send(Seen::File(headers, body)).unwrap();
             respond(stream, json!({"type": "sync", "metadata": {}}));
         }
+        "/1.0/instances/c1/files?path=/usr/local/lib" => respond(
+            stream,
+            json!({"type": "sync", "metadata": ["bin", "python3"]}),
+        ),
+        "/1.0/instances/c1/files?path=/usr/local/lib/node_modules" => {
+            if request_line.starts_with("GET") {
+                respond(
+                    stream,
+                    json!({"type": "error", "error": "Not found", "error_code": 404}),
+                );
+            } else {
+                seen.send(Seen::File(headers, body)).unwrap();
+                respond(stream, json!({"type": "sync", "metadata": {}}));
+            }
+        }
         "/1.0/instances/missing/files?path=/usr/local/bin/agent" => respond(
             stream,
             json!({"type": "error", "error": "Instance not found", "error_code": 404}),
@@ -320,4 +335,22 @@ fn pushes_files_into_an_instance() {
         .push_file("missing", "/usr/local/bin/agent", 0o755, &mut &b"x"[..], 1)
         .unwrap_err();
     assert_eq!(error, "Instance not found");
+}
+
+#[test]
+fn makes_directories_that_are_missing() {
+    let (_dir, client, seen) = fake_lxd();
+    client.make_dir("c1", "/usr/local/lib", 0o755).unwrap();
+    client
+        .make_dir("c1", "/usr/local/lib/node_modules", 0o755)
+        .unwrap();
+    // Only the missing one is made.
+    let Seen::File(headers, body) = seen.recv_timeout(Duration::from_secs(5)).unwrap() else {
+        panic!("expected a directory");
+    };
+    assert!(body.is_empty());
+    for header in ["X-LXD-type: directory", "X-LXD-mode: 0755"] {
+        assert!(headers.iter().any(|h| h == header), "missing {header}");
+    }
+    assert!(seen.recv_timeout(Duration::from_millis(200)).is_err());
 }
