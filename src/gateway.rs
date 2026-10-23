@@ -25,12 +25,47 @@ impl fmt::Debug for Credentials {
     }
 }
 
+/// An account to store with the gateway.
+#[derive(Debug, Clone)]
+pub enum NewAccount {
+    /// Credentials as provider `name` of profile `kind`.
+    Key {
+        name: String,
+        kind: String,
+        credentials: Credentials,
+    },
+    /// A Codex sign-in as provider `name`, renewed by the gateway.
+    Codex { name: String, tokens: CodexTokens },
+}
+
+impl NewAccount {
+    async fn create(self, gateway: &mut Gateway) -> Result<(), Error> {
+        match self {
+            NewAccount::Key {
+                name,
+                kind,
+                credentials,
+            } => {
+                gateway
+                    .create_provider(&name, &kind, credentials.0, BTreeMap::new())
+                    .await?;
+            }
+            NewAccount::Codex { name, tokens } => {
+                gateway.create_codex_provider(&name, &tokens).await?;
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Command {
     Refresh,
+    /// Create a sandbox, after the account it uses when that is new.
     Create {
         name: String,
         options: CreateOptions,
+        account: Option<NewAccount>,
     },
     Start(String),
     Stop(String),
@@ -310,7 +345,16 @@ async fn execute(gateway: &mut Gateway, command: Command) -> Result<Outcome, Err
     let mut accounts_changed = false;
     let message = match command {
         Command::Refresh => None,
-        Command::Create { name, options } => {
+        Command::Create {
+            name,
+            options,
+            account,
+        } => {
+            // A sandbox needs its account; without one there is no point.
+            if let Some(account) = account {
+                accounts_changed = true;
+                account.create(gateway).await?;
+            }
             gateway.create(&name, &options).await?;
             Some(format!("Created {name}"))
         }
@@ -373,15 +417,24 @@ async fn execute(gateway: &mut Gateway, command: Command) -> Result<Outcome, Err
             kind,
             credentials,
         } => {
-            gateway
-                .create_provider(&name, &kind, credentials.0, BTreeMap::new())
-                .await?;
             accounts_changed = true;
+            NewAccount::Key {
+                name: name.clone(),
+                kind,
+                credentials,
+            }
+            .create(gateway)
+            .await?;
             Some(format!("Added account {name}"))
         }
         Command::CreateCodexProvider { name, tokens } => {
-            gateway.create_codex_provider(&name, &tokens).await?;
             accounts_changed = true;
+            NewAccount::Codex {
+                name: name.clone(),
+                tokens,
+            }
+            .create(gateway)
+            .await?;
             Some(format!("Added Codex account {name}"))
         }
         Command::DeleteProvider(name) => {

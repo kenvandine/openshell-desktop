@@ -566,14 +566,13 @@ impl Window {
             folder,
             options,
         } = request;
-        // Commands run in order, so the account exists before the sandbox.
-        match account {
+        let account = match account {
             Account::New {
                 name: provider,
                 kind,
                 env_var,
                 key,
-            } => self.send(Command::CreateProvider {
+            } => Some(gateway::NewAccount::Key {
                 name: provider,
                 kind,
                 credentials: gateway::Credentials([(env_var, key)].into()),
@@ -581,12 +580,12 @@ impl Window {
             Account::Codex {
                 name: provider,
                 tokens,
-            } => self.send(Command::CreateCodexProvider {
+            } => Some(gateway::NewAccount::Codex {
                 name: provider,
                 tokens,
             }),
-            Account::None | Account::Existing(_) => {}
-        }
+            Account::None | Account::Existing(_) => None,
+        };
         if agent.is_some() || folder.is_some() {
             self.imp()
                 .pending_launch
@@ -595,7 +594,11 @@ impl Window {
         }
         // Pulling images can take a while before the gateway answers.
         self.toast(&format!("Creating {name}…"));
-        self.send(Command::Create { name, options });
+        self.send(Command::Create {
+            name,
+            options,
+            account,
+        });
     }
 
     /// Mounts the project folder and starts the agent (or a shell) for each
